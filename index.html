@@ -1,0 +1,2649 @@
+<!DOCTYPE html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#05060a">
+<meta name="description" content="Simulação de fluidos interativa em tempo real (Navier-Stokes na GPU, WebGL2).">
+<title>Fluido — simulação interativa</title>
+
+<!-- Fonte opcional: se estiver offline, a pilha de fontes do sistema assume sem bloquear nada. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" media="print" onload="this.media='all'">
+
+<style>
+/* ==========================================================================
+   TOKENS
+   ========================================================================== */
+:root {
+  --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+  --bg: #05060a;
+  --glass: rgba(16, 18, 26, 0.44);
+  --glass-solid: rgba(16, 18, 26, 0.82);
+  --stroke: rgba(255, 255, 255, 0.10);
+  --stroke-strong: rgba(255, 255, 255, 0.20);
+  --text: rgba(255, 255, 255, 0.92);
+  --text-dim: rgba(255, 255, 255, 0.58);
+  --text-faint: rgba(255, 255, 255, 0.36);
+  --fill: rgba(255, 255, 255, 0.07);
+  --fill-hover: rgba(255, 255, 255, 0.13);
+  --fill-active: rgba(255, 255, 255, 0.18);
+  --knob: #ffffff;
+  --shadow: 0 24px 64px -12px rgba(0, 0, 0, 0.55), 0 2px 8px rgba(0, 0, 0, 0.25);
+  --highlight: inset 0 1px 0 rgba(255, 255, 255, 0.10);
+
+  --accent: #7aa8ff;            /* atualizado em tempo real com a cor do pincel */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --radius: 22px;
+
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+}
+
+:root[data-theme="light"] {
+  --bg: #f3efe6;
+  --glass: rgba(255, 255, 255, 0.50);
+  --glass-solid: rgba(255, 255, 255, 0.88);
+  --stroke: rgba(24, 22, 30, 0.10);
+  --stroke-strong: rgba(24, 22, 30, 0.22);
+  --text: rgba(22, 21, 28, 0.92);
+  --text-dim: rgba(22, 21, 28, 0.60);
+  --text-faint: rgba(22, 21, 28, 0.40);
+  --fill: rgba(24, 22, 30, 0.06);
+  --fill-hover: rgba(24, 22, 30, 0.11);
+  --fill-active: rgba(24, 22, 30, 0.16);
+  --knob: #ffffff;
+  --shadow: 0 24px 64px -16px rgba(60, 50, 30, 0.30), 0 2px 8px rgba(60, 50, 30, 0.10);
+  --highlight: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+/* ==========================================================================
+   BASE
+   ========================================================================== */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: var(--bg);
+  overscroll-behavior: none;
+}
+
+body {
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background-color 0.6s var(--ease);
+}
+
+[hidden] { display: none !important; }
+button, input { font: inherit; color: inherit; }
+button { background: none; border: 0; padding: 0; cursor: pointer; }
+svg { display: block; }
+
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* A simulação é a protagonista: canvas em tela cheia. */
+#fluid {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+  transition: opacity 0.3s ease;
+}
+#fluid.is-switching { opacity: 0; }
+
+/* Camada de interface: não intercepta o ponteiro, só os próprios controles. */
+.ui {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.ui > * { pointer-events: auto; }
+
+.glass {
+  background: var(--glass);
+  border: 1px solid var(--stroke);
+  box-shadow: var(--shadow), var(--highlight);
+  -webkit-backdrop-filter: blur(26px) saturate(170%);
+  backdrop-filter: blur(26px) saturate(170%);
+  transition: background-color 0.5s var(--ease), border-color 0.5s var(--ease), box-shadow 0.5s var(--ease);
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass { background: var(--glass-solid); }
+}
+
+/* ==========================================================================
+   PAINEL DE CONTROLES
+   ========================================================================== */
+.panel {
+  position: absolute;
+  top: calc(16px + var(--safe-t));
+  right: calc(16px + var(--safe-r));
+  width: 304px;
+  max-width: calc(100vw - 32px - var(--safe-l) - var(--safe-r));
+  max-height: calc(100% - 32px - var(--safe-t) - var(--safe-b));
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius);
+  overflow: hidden;
+  transform-origin: top right;
+  transition: opacity 0.5s var(--ease), transform 0.5s var(--ease), width 0.5s var(--ease),
+              background-color 0.5s var(--ease), border-color 0.5s var(--ease), box-shadow 0.5s var(--ease);
+}
+
+.panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 10px 10px 18px;
+  cursor: pointer;
+  flex: none;
+}
+
+.panel__title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
+.panel__dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 14px 1px var(--accent);
+  transition: background-color 0.4s linear, box-shadow 0.4s linear;
+}
+
+/* Recolhimento suave: a linha do grid anima de 1fr para 0fr. */
+.panel__collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-height: 0;
+  transition: grid-template-rows 0.55s var(--ease), opacity 0.4s var(--ease);
+}
+.panel__collapse > .panel__scroll { min-height: 0; overflow: hidden auto; }
+.panel.is-collapsed { width: 148px; }
+.panel.is-collapsed .panel__collapse { grid-template-rows: 0fr; opacity: 0; }
+.panel.is-collapsed .panel__chevron { transform: rotate(180deg); }
+
+.panel__scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--stroke-strong) transparent;
+  overscroll-behavior: contain;
+}
+.panel__scroll::-webkit-scrollbar { width: 6px; }
+.panel__scroll::-webkit-scrollbar-thumb { background: var(--stroke-strong); border-radius: 3px; }
+
+.panel__body { padding: 2px 18px 14px; width: 302px; max-width: calc(100vw - 34px - var(--safe-l) - var(--safe-r)); }
+
+.section { padding: 12px 0 2px; border-top: 1px solid var(--stroke); }
+.section:first-child { border-top: 0; padding-top: 4px; }
+.section__title {
+  margin: 0 0 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--text-dim);
+  transition: background-color 0.25s var(--ease), color 0.25s var(--ease), transform 0.25s var(--ease);
+}
+.icon-btn:hover { background: var(--fill-hover); color: var(--text); }
+.icon-btn:active { transform: scale(0.9); }
+.panel__chevron { transition: transform 0.55s var(--ease); }
+
+/* ---- Controle segmentado (modo de cor, fundo) ---- */
+.seg {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 13px;
+  background: var(--fill);
+  margin-bottom: 10px;
+}
+.seg__btn {
+  flex: 1 1 auto;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  white-space: nowrap;
+  transition: background-color 0.35s var(--ease), color 0.35s var(--ease), box-shadow 0.35s var(--ease), transform 0.2s var(--ease);
+}
+.seg__btn:hover { color: var(--text); }
+.seg__btn:active { transform: scale(0.96); }
+.seg__btn[aria-checked="true"] {
+  background: var(--fill-active);
+  color: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18), var(--highlight);
+}
+
+/* ---- Blocos que aparecem conforme o modo de cor ---- */
+.reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  visibility: hidden;
+  transition: grid-template-rows 0.5s var(--ease), opacity 0.3s var(--ease), visibility 0s linear 0.5s;
+}
+.reveal > div { min-height: 0; overflow: hidden; }
+.reveal.is-open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+  visibility: visible;
+  transition: grid-template-rows 0.5s var(--ease), opacity 0.5s var(--ease) 0.08s, visibility 0s;
+}
+
+.palettes {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 3px 3px 12px;
+}
+.palette {
+  position: relative;
+  height: 46px;
+  border-radius: 13px;
+  background: var(--g);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+  transition: transform 0.35s var(--ease-spring), box-shadow 0.3s var(--ease);
+}
+.palette span {
+  position: absolute;
+  left: 9px;
+  bottom: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #fff;
+  text-shadow: 0 1px 5px rgba(0, 0, 0, 0.6);
+}
+.palette:hover { transform: translateY(-1px) scale(1.035); }
+.palette:active { transform: scale(0.96); }
+.palette[aria-checked="true"] { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.3), 0 0 0 2px var(--text); }
+
+.color-row { display: flex; align-items: center; gap: 12px; padding: 3px 3px 12px; }
+.color-swatch {
+  position: relative;
+  flex: none;
+  width: 46px;
+  height: 46px;
+  border-radius: 14px;
+  overflow: hidden;
+  cursor: pointer;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.2), 0 6px 18px -6px var(--accent);
+  transition: transform 0.35s var(--ease-spring);
+}
+.color-swatch:hover { transform: scale(1.05); }
+.color-swatch input {
+  position: absolute;
+  inset: -12px;
+  width: calc(100% + 24px);
+  height: calc(100% + 24px);
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.color-meta { flex: 1; min-width: 0; }
+.color-hex { display: block; font: 500 11px var(--mono); color: var(--text-faint); margin-bottom: 7px; letter-spacing: 0.04em; }
+.swatches { display: flex; gap: 7px; }
+.swatch {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+  transition: transform 0.3s var(--ease-spring);
+}
+.swatch:hover { transform: scale(1.2); }
+.swatch:active { transform: scale(0.9); }
+
+/* ---- Sliders ---- */
+.slider { margin-bottom: 7px; }
+.slider__row { display: flex; align-items: baseline; justify-content: space-between; }
+.slider label { font-size: 12.5px; color: var(--text-dim); transition: color 0.3s var(--ease); }
+.slider:hover label, .slider:focus-within label { color: var(--text); }
+.slider output { font: 500 11px var(--mono); color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+input[type="range"] {
+  --p: 50%;
+  -webkit-appearance: none;
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--accent) var(--p), var(--fill-active) var(--p));
+}
+input[type="range"]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--fill-active); }
+input[type="range"]::-moz-range-progress { height: 4px; border-radius: 2px; background: var(--accent); }
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--knob);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4), 0 0 0 0.5px rgba(0, 0, 0, 0.14);
+  transition: transform 0.3s var(--ease-spring), box-shadow 0.3s var(--ease);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--knob);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4), 0 0 0 0.5px rgba(0, 0, 0, 0.14);
+  transition: transform 0.3s var(--ease-spring), box-shadow 0.3s var(--ease);
+}
+input[type="range"]:hover::-webkit-slider-thumb { transform: scale(1.12); }
+input[type="range"]:hover::-moz-range-thumb { transform: scale(1.12); }
+input[type="range"]:active::-webkit-slider-thumb { transform: scale(1.3); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45), 0 0 0 6px var(--fill-hover); }
+input[type="range"]:active::-moz-range-thumb { transform: scale(1.3); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.45), 0 0 0 6px var(--fill-hover); }
+input[type="range"]:focus-visible { outline: none; }
+input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px var(--accent); }
+input[type="range"]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 3px var(--accent); }
+
+/* ---- Interruptores dos efeitos ---- */
+.toggles { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 38px;
+  padding: 0 12px;
+  border-radius: 13px;
+  background: var(--fill);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-align: left;
+  transition: background-color 0.3s var(--ease), color 0.3s var(--ease), transform 0.2s var(--ease), opacity 0.3s var(--ease);
+}
+.toggle:hover { background: var(--fill-hover); }
+.toggle:active { transform: scale(0.97); }
+.toggle[aria-checked="true"] { color: var(--text); }
+.toggle:disabled { opacity: 0.4; cursor: not-allowed; }
+.toggle__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--fill-active);
+  box-shadow: inset 0 0 0 1px var(--stroke-strong);
+  transition: background-color 0.4s var(--ease), box-shadow 0.4s var(--ease), transform 0.45s var(--ease-spring);
+}
+.toggle[aria-checked="true"] { background: var(--fill-hover); }
+.toggle[aria-checked="true"] .toggle__dot { background: var(--accent); box-shadow: 0 0 10px 0 var(--accent); transform: scale(1.15); }
+
+/* Linha "rótulo + controle" (fundo escuro/claro) */
+.field-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.field-row__label { font-size: 12.5px; color: var(--text-dim); }
+.field-row .seg { flex: 0 0 168px; margin: 0; }
+.field-row .seg__btn { height: 26px; }
+
+.panel__foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--stroke);
+  font: 500 10.5px var(--mono);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+kbd {
+  display: inline-block;
+  min-width: 17px;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--fill-hover);
+  font: 600 10px var(--mono);
+  color: var(--text-dim);
+  text-align: center;
+}
+
+/* ==========================================================================
+   BARRA DE AÇÕES
+   ========================================================================== */
+.dock {
+  position: absolute;
+  left: 50%;
+  bottom: calc(18px + var(--safe-b));
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 999px;
+  transition: opacity 0.5s var(--ease), transform 0.5s var(--ease),
+              background-color 0.5s var(--ease), border-color 0.5s var(--ease), box-shadow 0.5s var(--ease);
+}
+.dock__btn {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--text-dim);
+  transition: background-color 0.25s var(--ease), color 0.25s var(--ease), transform 0.25s var(--ease);
+}
+.dock__btn svg { grid-area: 1 / 1; width: 19px; height: 19px; transition: opacity 0.3s var(--ease), transform 0.4s var(--ease-spring); }
+.dock__btn:hover { background: var(--fill-hover); color: var(--text); }
+.dock__btn:active { transform: scale(0.86); }
+.dock__btn[aria-pressed="true"] { color: var(--text); background: var(--fill-active); }
+.dock__sep { width: 1px; height: 20px; margin: 0 5px; background: var(--stroke); }
+
+/* Ícones que se alternam (pausar/continuar, entrar/sair da tela cheia). */
+.dock__btn .ico-b { opacity: 0; transform: scale(0.5) rotate(-30deg); }
+.dock__btn.is-alt .ico-a { opacity: 0; transform: scale(0.5) rotate(30deg); }
+.dock__btn.is-alt .ico-b { opacity: 1; transform: none; }
+
+.dock__btn::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 14px);
+  transform: translate(-50%, 4px);
+  padding: 6px 10px;
+  border-radius: 9px;
+  background: var(--glass-solid);
+  border: 1px solid var(--stroke);
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s var(--ease), transform 0.3s var(--ease);
+}
+@media (hover: hover) {
+  .dock__btn:hover::after, .dock__btn:focus-visible::after { opacity: 1; transform: translate(-50%, 0); transition-delay: 0.35s; }
+}
+
+/* ==========================================================================
+   TEXTOS FLUTUANTES: abertura, avisos, modo contemplação
+   ========================================================================== */
+.intro {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: min(86vw, 640px);
+  transform: translate(-50%, -50%);
+  text-align: center;
+  pointer-events: none !important;
+  transition: opacity 1.4s var(--ease), transform 1.4s var(--ease), filter 1.4s var(--ease);
+}
+.intro h1 {
+  margin: 0 0 10px;
+  font-size: clamp(26px, 4.2vw, 46px);
+  font-weight: 500;
+  letter-spacing: -0.03em;
+  line-height: 1.08;
+  color: var(--text);
+  text-shadow: 0 2px 30px var(--bg);
+}
+.intro p { margin: 0; font-size: clamp(12.5px, 1.3vw, 14.5px); color: var(--text-dim); text-shadow: 0 1px 16px var(--bg); }
+.intro.is-gone { opacity: 0; transform: translate(-50%, -50%) scale(1.04); filter: blur(8px); }
+
+.toast {
+  position: absolute;
+  left: 50%;
+  top: calc(20px + var(--safe-t));
+  transform: translate(-50%, -14px);
+  padding: 9px 16px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none !important;
+  transition: opacity 0.4s var(--ease), transform 0.5s var(--ease);
+}
+.toast.is-visible { opacity: 1; transform: translate(-50%, 0); }
+
+.restore {
+  position: absolute;
+  right: calc(14px + var(--safe-r));
+  bottom: calc(14px + var(--safe-b));
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--text-dim);
+  opacity: 0;
+  visibility: hidden;
+  transform: scale(0.8);
+  transition: opacity 0.5s var(--ease), transform 0.5s var(--ease), visibility 0s linear 0.5s;
+}
+.restore svg { width: 18px; height: 18px; }
+
+/* Tecla H: tudo some e só o fluido permanece. */
+body.ui-hidden .panel,
+body.ui-hidden .dock,
+body.ui-hidden .intro {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.5s var(--ease), transform 0.5s var(--ease), visibility 0s linear 0.5s;
+}
+body.ui-hidden .panel { transform: translateY(-10px) scale(0.98); }
+body.ui-hidden .dock { transform: translate(-50%, 14px) scale(0.98); }
+body.ui-hidden #fluid { cursor: none; }
+/* Em telas de toque não existe tecla H: um botão discreto traz a interface de volta. */
+@media (hover: none), (pointer: coarse) {
+  .key-hint { display: none; }
+  body.ui-hidden .restore { opacity: 0.6; visibility: visible; transform: none; transition: opacity 0.5s var(--ease) 0.3s, transform 0.5s var(--ease) 0.3s, visibility 0s; }
+}
+
+.fallback {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  display: none;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  background: var(--bg);
+}
+.fallback.is-visible { display: grid; }
+.fallback div { max-width: 420px; }
+.fallback h2 { margin: 0 0 8px; font-size: 20px; font-weight: 600; letter-spacing: -0.01em; }
+.fallback p { margin: 0; color: var(--text-dim); font-size: 14px; }
+
+/* ==========================================================================
+   RESPONSIVO E ACESSIBILIDADE
+   ========================================================================== */
+@media (max-width: 980px) {
+  .panel { max-height: calc(100% - 112px - var(--safe-t) - var(--safe-b)); }
+}
+@media (max-width: 560px) {
+  .panel { top: calc(10px + var(--safe-t)); right: calc(10px + var(--safe-r)); max-width: calc(100vw - 20px - var(--safe-l) - var(--safe-r)); max-height: calc(100% - 96px - var(--safe-t) - var(--safe-b)); }
+  .panel__body { max-width: calc(100vw - 22px - var(--safe-l) - var(--safe-r)); }
+  .dock { bottom: calc(12px + var(--safe-b)); }
+  .dock__btn { width: 44px; height: 44px; }
+  .dock__sep { margin: 0 2px; }
+  .toast { top: auto; bottom: calc(82px + var(--safe-b)); }
+}
+@media (max-width: 360px) {
+  .dock__btn { width: 40px; height: 40px; }
+  .dock__sep { display: none; }
+}
+@media (max-height: 460px) {
+  .intro h1 { font-size: 24px; }
+  .panel { max-height: calc(100% - 20px - var(--safe-t) - var(--safe-b)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0.01ms !important; transition-delay: 0s !important; }
+}
+</style>
+</head>
+<body>
+
+<canvas id="fluid" aria-label="Simulação de fluido interativa"></canvas>
+
+<div class="ui" id="ui">
+
+  <!-- Painel de controles (vidro fosco, recolhível) -->
+  <aside class="panel glass" id="panel" aria-label="Controles da simulação">
+    <header class="panel__head" id="panelHead">
+      <div class="panel__title"><span class="panel__dot"></span>Fluido</div>
+      <button class="icon-btn" id="btnCollapse" type="button" aria-expanded="true" aria-controls="panelCollapse" aria-label="Recolher ou expandir o painel">
+        <svg class="panel__chevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 14l6-6 6 6"/></svg>
+      </button>
+    </header>
+
+    <div class="panel__collapse" id="panelCollapse">
+      <div class="panel__scroll">
+        <div class="panel__body">
+
+          <section class="section">
+            <h2 class="section__title">Cores</h2>
+            <div class="seg" id="segMode" role="radiogroup" aria-label="Modo de cor">
+              <button class="seg__btn" type="button" role="radio" data-value="rainbow">Arco-íris</button>
+              <button class="seg__btn" type="button" role="radio" data-value="palette">Paletas</button>
+              <button class="seg__btn" type="button" role="radio" data-value="custom">Personalizada</button>
+            </div>
+            <div class="reveal" id="revealPalette">
+              <div><div class="palettes" id="palettes" role="radiogroup" aria-label="Paletas artísticas"></div></div>
+            </div>
+            <div class="reveal" id="revealCustom">
+              <div>
+                <div class="color-row">
+                  <label class="color-swatch" title="Escolher cor">
+                    <input type="color" id="customColor" value="#3d8bff" aria-label="Cor personalizada">
+                  </label>
+                  <div class="color-meta">
+                    <span class="color-hex" id="customHex">#3D8BFF</span>
+                    <div class="swatches" id="swatches"></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="section">
+            <h2 class="section__title">Fluido</h2>
+            <div id="sliders"></div>
+          </section>
+
+          <section class="section">
+            <h2 class="section__title">Visual</h2>
+            <div class="toggles" id="toggles"></div>
+            <div class="field-row">
+              <span class="field-row__label" id="themeLabel">Fundo</span>
+              <div class="seg" id="segTheme" role="radiogroup" aria-labelledby="themeLabel">
+                <button class="seg__btn" type="button" role="radio" data-value="dark">Escuro</button>
+                <button class="seg__btn" type="button" role="radio" data-value="light">Claro</button>
+              </div>
+            </div>
+            <div class="panel__foot">
+              <span id="stats" title="Quadros por segundo · resolução da simulação / da tinta">—</span>
+              <span class="key-hint"><kbd>H</kbd> oculta tudo</span>
+            </div>
+          </section>
+
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Barra de ações -->
+  <nav class="dock glass" id="dock" aria-label="Ações">
+    <button class="dock__btn" id="btnPause" type="button" aria-pressed="false" aria-label="Pausar ou continuar" data-tip="Pausar · Espaço">
+      <svg class="ico-a" viewBox="0 0 24 24" fill="currentColor"><rect x="6.5" y="5" width="4" height="14" rx="1.3"/><rect x="13.5" y="5" width="4" height="14" rx="1.3"/></svg>
+      <svg class="ico-b" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.6v12.8a1 1 0 0 0 1.53.85l10.2-6.4a1 1 0 0 0 0-1.7L9.53 4.75A1 1 0 0 0 8 5.6z"/></svg>
+    </button>
+    <button class="dock__btn" id="btnClear" type="button" aria-label="Limpar" data-tip="Limpar · C">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12"/><path d="M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+    </button>
+    <button class="dock__btn" id="btnRandom" type="button" aria-label="Splats aleatórios" data-tip="Splats aleatórios · R">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M11 3l1.9 5.1L18 10l-5.1 1.9L11 17l-1.9-5.1L4 10l5.1-1.9L11 3z"/><path d="M18.5 15.5l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"/></svg>
+    </button>
+    <span class="dock__sep" aria-hidden="true"></span>
+    <button class="dock__btn" id="btnCapture" type="button" aria-label="Capturar imagem PNG" data-tip="Capturar PNG · S">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8.5A1.5 1.5 0 0 1 5.5 7h2.3l1.3-1.8a1 1 0 0 1 .8-.4h4.2a1 1 0 0 1 .8.4L16.2 7h2.3A1.5 1.5 0 0 1 20 8.5v9a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 17.5v-9z"/><circle cx="12" cy="13" r="3.2"/></svg>
+    </button>
+    <button class="dock__btn" id="btnFullscreen" type="button" aria-label="Tela cheia" data-tip="Tela cheia · F">
+      <svg class="ico-a" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V5a1 1 0 0 1 1-1h4"/><path d="M15 4h4a1 1 0 0 1 1 1v4"/><path d="M20 15v4a1 1 0 0 1-1 1h-4"/><path d="M9 20H5a1 1 0 0 1-1-1v-4"/></svg>
+      <svg class="ico-b" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v4a1 1 0 0 1-1 1H4"/><path d="M20 9h-4a1 1 0 0 1-1-1V4"/><path d="M15 20v-4a1 1 0 0 1 1-1h4"/><path d="M4 15h4a1 1 0 0 1 1 1v4"/></svg>
+    </button>
+    <button class="dock__btn" id="btnHide" type="button" aria-label="Ocultar interface" data-tip="Ocultar interface · H">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l18 18"/><path d="M10.5 6.2c.5-.1 1-.2 1.5-.2 5 0 8.5 4.2 9.5 6-.4.8-1.2 1.9-2.4 3"/><path d="M6.4 7.5C4.5 8.8 3.1 10.7 2.5 12c1 1.8 4.5 6 9.5 6 1.5 0 2.9-.4 4.1-1"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/></svg>
+    </button>
+  </nav>
+
+  <!-- Convite inicial: some na primeira interação -->
+  <div class="intro" id="intro">
+    <h1>Arraste para pintar</h1>
+    <p>Toque rápido para uma explosão de cor</p>
+  </div>
+
+  <div class="toast glass" id="toast" role="status" aria-live="polite"></div>
+
+  <button class="restore glass" id="btnRestore" type="button" aria-label="Mostrar interface">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12C3.5 10.2 7 6 12 6s8.5 4.2 9.5 6c-1 1.8-4.5 6-9.5 6s-8.5-4.2-9.5-6z"/><circle cx="12" cy="12" r="3"/></svg>
+  </button>
+</div>
+
+<div class="fallback" id="fallback">
+  <div>
+    <h2>Não foi possível iniciar a simulação</h2>
+    <p id="fallbackText">Este navegador não oferece o suporte a WebGL necessário para simular o fluido na GPU. Tente um navegador atualizado.</p>
+  </div>
+</div>
+
+<!-- ==========================================================================
+     SHADERS — SIMULAÇÃO (Navier-Stokes incompressível, "stable fluids")
+     GLSL ES 1.00: o mesmo código roda em WebGL2 e em WebGL1.
+     A linha de precisão e os #define de variantes são inseridos pelo JavaScript.
+     Convenção: a velocidade é guardada em "lados menores da tela por segundo",
+     então o comportamento não muda quando a resolução da grade é ajustada.
+     ========================================================================== -->
+
+<!-- Vértice único para todos os passes: um quadrado de tela cheia + coordenadas dos 4 vizinhos. -->
+<script type="x-shader/x-vertex" id="vs-base">
+attribute vec2 aPosition;
+uniform vec2 uTexelSize;
+varying vec2 vUv;
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
+
+void main () {
+    vUv = aPosition * 0.5 + 0.5;
+    vL = vUv - vec2(uTexelSize.x, 0.0);
+    vR = vUv + vec2(uTexelSize.x, 0.0);
+    vT = vUv + vec2(0.0, uTexelSize.y);
+    vB = vUv - vec2(0.0, uTexelSize.y);
+    gl_Position = vec4(aPosition, 0.0, 1.0);
+}
+</script>
+
+<!-- Cópia simples (usada ao redimensionar os buffers). -->
+<script type="x-shader/x-fragment" id="fs-copy">
+varying vec2 vUv;
+uniform sampler2D uTexture;
+
+void main () {
+    gl_FragColor = texture2D(uTexture, vUv);
+}
+</script>
+
+<!-- Multiplica um campo por um escalar (limpar a tela, amortecer a pressão entre quadros). -->
+<script type="x-shader/x-fragment" id="fs-clear">
+varying vec2 vUv;
+uniform sampler2D uTexture;
+uniform float uValue;
+
+void main () {
+    gl_FragColor = uValue * texture2D(uTexture, vUv);
+}
+</script>
+
+<!-- Splat: soma uma gaussiana (força ou tinta) em torno de um ponto. -->
+<script type="x-shader/x-fragment" id="fs-splat">
+varying vec2 vUv;
+uniform sampler2D uTarget;
+uniform vec2 uAspect;      // tamanho da tela em "lados menores" (corrige a proporção)
+uniform vec2 uPoint;
+uniform vec3 uColor;
+uniform float uRadius;
+
+void main () {
+    vec2 p = (vUv - uPoint) * uAspect;
+    vec3 splat = exp(-dot(p, p) / uRadius) * uColor;
+    vec3 base = texture2D(uTarget, vUv).xyz;
+    gl_FragColor = vec4(base + splat, 1.0);
+}
+</script>
+
+<!-- Advecção semi-lagrangiana: segue a velocidade "para trás" e amostra o campo de origem.
+     Serve tanto para a própria velocidade quanto para a tinta; a dissipação entra aqui. -->
+<script type="x-shader/x-fragment" id="fs-advection">
+varying vec2 vUv;
+uniform sampler2D uVelocity;
+uniform sampler2D uSource;
+uniform vec2 uUvPerUnit;          // converte velocidade em deslocamento de UV
+uniform vec2 uVelocityTexelSize;
+uniform vec2 uSourceTexelSize;
+uniform float uDt;
+uniform float uDissipation;
+
+// Interpolação bilinear manual, para GPUs que não filtram texturas de ponto flutuante.
+vec4 bilerp (sampler2D sam, vec2 uv, vec2 tsize) {
+    vec2 st = uv / tsize - 0.5;
+    vec2 iuv = floor(st);
+    vec2 fuv = fract(st);
+    vec4 a = texture2D(sam, (iuv + vec2(0.5, 0.5)) * tsize);
+    vec4 b = texture2D(sam, (iuv + vec2(1.5, 0.5)) * tsize);
+    vec4 c = texture2D(sam, (iuv + vec2(0.5, 1.5)) * tsize);
+    vec4 d = texture2D(sam, (iuv + vec2(1.5, 1.5)) * tsize);
+    return mix(mix(a, b, fuv.x), mix(c, d, fuv.x), fuv.y);
+}
+
+void main () {
+#ifdef MANUAL_FILTERING
+    vec2 coord = vUv - uDt * bilerp(uVelocity, vUv, uVelocityTexelSize).xy * uUvPerUnit;
+    vec4 result = bilerp(uSource, coord, uSourceTexelSize);
+#else
+    vec2 coord = vUv - uDt * texture2D(uVelocity, vUv).xy * uUvPerUnit;
+    vec4 result = texture2D(uSource, coord);
+#endif
+    gl_FragColor = result / (1.0 + uDissipation * uDt);
+}
+</script>
+
+<!-- Rotacional (vorticidade) do campo de velocidade. -->
+<script type="x-shader/x-fragment" id="fs-curl">
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
+uniform sampler2D uVelocity;
+
+void main () {
+    float L = texture2D(uVelocity, vL).y;
+    float R = texture2D(uVelocity, vR).y;
+    float T = texture2D(uVelocity, vT).x;
+    float B = texture2D(uVelocity, vB).x;
+    gl_FragColor = vec4(0.5 * (R - L - T + B), 0.0, 0.0, 1.0);
+}
+</script>
+
+<!-- Vorticity confinement: devolve a energia rotacional que a advecção numérica dissipa,
+     empurrando o fluido ao redor dos picos de vorticidade (redemoinhos mais nítidos). -->
+<script type="x-shader/x-fragment" id="fs-vorticity">
+varying vec2 vUv;
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
+uniform sampler2D uVelocity;
+uniform sampler2D uCurl;
+uniform float uCurlStrength;
+uniform float uDt;
+
+void main () {
+    float L = texture2D(uCurl, vL).x;
+    float R = texture2D(uCurl, vR).x;
+    float T = texture2D(uCurl, vT).x;
+    float B = texture2D(uCurl, vB).x;
+    float C = texture2D(uCurl, vUv).x;
+
+    vec2 force = 0.5 * vec2(abs(T) - abs(B), abs(R) - abs(L));
+    force /= length(force) + 0.00002;
+    force *= uCurlStrength * C;
+    force.y *= -1.0;
+
+    vec2 velocity = texture2D(uVelocity, vUv).xy + force * uDt;
+    gl_FragColor = vec4(clamp(velocity, -12.0, 12.0), 0.0, 1.0);
+}
+</script>
+
+<!-- Difusão viscosa implícita, resolvida por Jacobi: (I - ν·dt·∇²) u = u₀. -->
+<script type="x-shader/x-fragment" id="fs-viscosity">
+varying vec2 vUv;
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
+uniform sampler2D uVelocity;   // iteração atual
+uniform sampler2D uSource;     // u₀: velocidade antes da difusão
+uniform float uAlpha;          // ν·dt / dx²
+
+void main () {
+    vec2 L = texture2D(uVelocity, vL).xy;
+    vec2 R = texture2D(uVelocity, vR).xy;
+    vec2 T = texture2D(uVelocity, vT).xy;
+    vec2 B = texture2D(uVelocity, vB).xy;
+    vec2 u0 = texture2D(uSource, vUv).xy;
+    gl_FragColor = vec4((u0 + uAlpha * (L + R + T + B)) / (1.0 + 4.0 * uAlpha), 0.0, 1.0);
+}
+</script>
+
+<!-- Divergência da velocidade. Nas bordas a velocidade é refletida (paredes sólidas). -->
+<script type="x-shader/x-fragment" id="fs-divergence">
+varying vec2 vUv;
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
+uniform sampler2D uVelocity;
+
+void main () {
+    float L = texture2D(uVelocity, vL).x;
+    float R = texture2D(uVelocity, vR).x;
+    float T = texture2D(uVelocity, vT).y;
+    float B = texture2D(uVelocity, vB).y;
+    vec2 C = texture2D(uVelocity, vUv).xy;
+    if (vL.x < 0.0) { L = -C.x; }
+    if (vR.x > 1.0) { R = -C.x; }
+    if (vT.y > 1.0) { T = -C.y; }
+    if (vB.y < 0.0) { B = -C.y; }
+    gl_FragColor = vec4(0.5 * (R - L + T - B), 0.0, 0.0, 1.0);
+}
+</script>
+
+<!-- Uma iteração de Jacobi da equação de Poisson da pressão: ∇²p = ∇·u.
+     uOmega = 1 é o Jacobi puro; valores > 1 aplicam a aceleração de Chebyshev,
+     que combina a nova estimativa com a penúltima para convergir em menos passos. -->
+<script type="x-shader/x-fragment" id="fs-pressure">
+varying vec2 vUv;
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
+uniform sampler2D uPressure;       // iteração k
+uniform sampler2D uPrevPressure;   // iteração k-1
+uniform sampler2D uDivergence;
+uniform float uOmega;
+
+void main () {
+    float L = texture2D(uPressure, vL).x;
+    float R = texture2D(uPressure, vR).x;
+    float T = texture2D(uPressure, vT).x;
+    float B = texture2D(uPressure, vB).x;
+    float divergence = texture2D(uDivergence, vUv).x;
+    float jacobi = (L + R + B + T - divergence) * 0.25;
+    float previous = texture2D(uPrevPressure, vUv).x;
+    gl_FragColor = vec4(mix(previous, jacobi, uOmega), 0.0, 0.0, 1.0);
+}
+</script>
+
+<!-- Projeção: subtrai o gradiente da pressão para deixar a velocidade sem divergência. -->
+<script type="x-shader/x-fragment" id="fs-gradient-subtract">
+varying vec2 vUv;
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
+uniform sampler2D uPressure;
+uniform sampler2D uVelocity;
+
+void main () {
+    float L = texture2D(uPressure, vL).x;
+    float R = texture2D(uPressure, vR).x;
+    float T = texture2D(uPressure, vT).x;
+    float B = texture2D(uPressure, vB).x;
+    vec2 velocity = texture2D(uVelocity, vUv).xy;
+    velocity -= 0.5 * vec2(R - L, T - B);
+    gl_FragColor = vec4(velocity, 0.0, 1.0);
+}
+</script>
+
+<!-- ==========================================================================
+     SHADERS — PÓS-PROCESSAMENTO E EXIBIÇÃO
+     A tinta é tratada como luz linear (HDR); o mapeamento de tons e a curva
+     gama só acontecem no passe final de exibição.
+     ========================================================================== -->
+
+<!-- Bloom 1/2: isola as áreas mais brilhantes com um limiar de joelho suave. -->
+<script type="x-shader/x-fragment" id="fs-bloom-prefilter">
+varying vec2 vUv;
+uniform sampler2D uTexture;
+uniform vec3 uCurve;        // (limiar - joelho, 2·joelho, 0.25 / joelho)
+uniform float uThreshold;
+
+void main () {
+    vec3 c = max(texture2D(uTexture, vUv).rgb, 0.0);
+    float br = max(c.r, max(c.g, c.b));
+    float rq = clamp(br - uCurve.x, 0.0, uCurve.y);
+    rq = uCurve.z * rq * rq;
+    c *= max(rq, br - uThreshold) / max(br, 0.0001);
+    c /= 1.0 + 0.35 * br;       // comprime os picos HDR: o brilho satura em vez de estourar
+    gl_FragColor = vec4(c, 1.0);
+}
+</script>
+
+<!-- Bloom 2/2: desfoque em caixa de 4 amostras, usado ao reduzir e ao ampliar a pirâmide. -->
+<script type="x-shader/x-fragment" id="fs-bloom-blur">
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
+uniform sampler2D uTexture;
+
+void main () {
+    vec4 sum = texture2D(uTexture, vL) + texture2D(uTexture, vR)
+             + texture2D(uTexture, vT) + texture2D(uTexture, vB);
+    gl_FragColor = sum * 0.25;
+}
+</script>
+
+<!-- Raios de luz 1/3: guarda a cor da tinta (rgb) e o quanto cada ponto deixa a luz passar (a). -->
+<script type="x-shader/x-fragment" id="fs-sunrays-mask">
+varying vec2 vUv;
+uniform sampler2D uTexture;
+
+void main () {
+    vec3 c = max(texture2D(uTexture, vUv).rgb, 0.0);
+    float br = max(c.r, max(c.g, c.b));
+    float transmittance = 1.0 - clamp(br * 10.0, 0.0, 0.8);
+    vec3 emission = c / (1.0 + br) * smoothstep(0.15, 0.9, br);
+    gl_FragColor = vec4(emission, transmittance);
+}
+</script>
+
+<!-- Raios de luz 2/3: espalhamento volumétrico. Cada pixel caminha em direção à fonte de luz
+     acumulando a cor que encontra (feixes coloridos) e a luz que consegue chegar (sombras). -->
+<script type="x-shader/x-fragment" id="fs-sunrays">
+varying vec2 vUv;
+uniform sampler2D uTexture;
+uniform vec2 uLightPos;
+
+#define ITERATIONS 16
+
+void main () {
+    const float density = 0.32;
+    const float decay = 0.95;
+
+    vec2 coord = vUv;
+    vec2 stepDir = (vUv - uLightPos) * (density / float(ITERATIONS));
+    float illumination = 1.0;
+    float weight = 1.0;
+    vec4 acc = texture2D(uTexture, vUv);
+
+    for (int i = 0; i < ITERATIONS; i++) {
+        coord -= stepDir;
+        acc += texture2D(uTexture, coord) * illumination;
+        weight += illumination;
+        illumination *= decay;
+    }
+    gl_FragColor = acc / weight;
+}
+</script>
+
+<!-- Raios de luz 3/3: desfoque gaussiano separável (um passe por eixo). -->
+<script type="x-shader/x-fragment" id="fs-blur">
+varying vec2 vUv;
+uniform sampler2D uTexture;
+uniform vec2 uDirection;    // um texel no eixo do desfoque
+
+void main () {
+    vec2 offset = uDirection * 1.33333333;
+    vec4 sum = texture2D(uTexture, vUv) * 0.29411764;
+    sum += texture2D(uTexture, vUv - offset) * 0.35294117;
+    sum += texture2D(uTexture, vUv + offset) * 0.35294117;
+    gl_FragColor = sum;
+}
+</script>
+
+<!-- Exibição: compõe tinta + efeitos sobre o fundo.
+     Variantes (#define): SHADING, BLOOM, SUNRAYS, LIGHT_BG.
+     Fundo escuro: a tinta emite luz (soma). Fundo claro: a tinta absorve luz, como aquarela no papel. -->
+<script type="x-shader/x-fragment" id="fs-display">
+varying vec2 vUv;
+varying vec2 vL;
+varying vec2 vR;
+varying vec2 vT;
+varying vec2 vB;
+uniform sampler2D uTexture;
+uniform sampler2D uBloom;
+uniform sampler2D uSunrays;
+uniform vec3 uBackground;       // cor de fundo em luz linear
+uniform vec2 uAspect;
+uniform vec2 uSeed;
+uniform float uBump;            // quanto menor, mais "alto" o relevo
+uniform float uBloomIntensity;
+uniform float uGrain;
+uniform float uGrainScale;
+
+float hash12 (vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+// Altura da superfície a partir da quantidade de tinta (comprimida para valores HDR).
+float inkHeight (vec3 c) {
+    float l = length(max(c, 0.0));
+    return l / (1.0 + l);
+}
+
+// Lei de Beer-Lambert: a tinta absorve o complemento da própria cor.
+// `boost` < 0 realça as aguadas finas e comprime as áreas densas (0 = resposta linear).
+vec3 inkAbsorb (vec3 c, float boost) {
+    float a = max(c.r, max(c.g, c.b));
+    return ((a - c) * 2.2 + a * 0.35) * pow(a + 0.0001, boost);
+}
+
+void main () {
+    vec3 c = max(texture2D(uTexture, vUv).rgb, 0.0);
+    float shade = 1.0;
+    float spec = 0.0;
+
+#ifdef SHADING
+    // Normal da superfície pelo gradiente da altura; luz vinda do alto, à esquerda.
+    float dx = inkHeight(texture2D(uTexture, vR).rgb) - inkHeight(texture2D(uTexture, vL).rgb);
+    float dy = inkHeight(texture2D(uTexture, vT).rgb) - inkHeight(texture2D(uTexture, vB).rgb);
+    vec3 n = normalize(vec3(-dx, -dy, uBump));
+    vec3 l = normalize(vec3(-0.45, 0.6, 0.66));
+    vec3 h = normalize(l + vec3(0.0, 0.0, 1.0));
+    shade = clamp(0.35 + 0.65 * dot(n, l) / l.z, 0.3, 1.45);
+    spec = pow(max(dot(n, h), 0.0), 56.0) * smoothstep(0.0, 0.25, inkHeight(c));
+#endif
+
+    vec3 shafts = vec3(0.0);
+#ifdef SUNRAYS
+    vec4 rays = texture2D(uSunrays, vUv);
+    c *= 0.72 + 0.8 * rays.a * rays.a;
+    shafts = rays.rgb;
+#endif
+
+    vec3 bloom = vec3(0.0);
+#ifdef BLOOM
+    bloom = texture2D(uBloom, vUv).rgb * uBloomIntensity;
+#endif
+
+    float vignette = smoothstep(1.3, 0.3, length((vUv - 0.5) * uAspect));
+
+#ifdef LIGHT_BG
+    vec3 absorb = inkAbsorb(c, -0.4) + inkAbsorb(bloom * 0.45 + shafts * 0.35, 0.0);
+    vec3 col = uBackground * mix(0.9, 1.0, vignette) * exp(-absorb);
+    col *= mix(1.0, shade, 0.55);
+    col += spec * 0.35;
+#else
+    vec3 col = c * shade + spec * (0.25 + 0.5 * c) + shafts * 0.45 + bloom;
+    float peak = max(col.r, max(col.g, col.b));
+    col += peak * peak * 0.035;             // núcleo "quente": a tinta muito densa clareia rumo ao branco
+    col = 1.0 - exp(-col);                  // mapeamento de tons
+    col *= mix(0.82, 1.0, vignette);
+    col += uBackground * mix(0.5, 1.0, vignette) * (1.0 - col);
+#endif
+
+    col = pow(max(col, 0.0), vec3(1.0 / 2.2));
+
+    // Grão de filme; mesmo desligado sobra 1/255 de ruído para evitar faixas nos degradês.
+    float noise = hash12(floor(gl_FragCoord.xy * uGrainScale) + uSeed) - 0.5;
+    col += noise * (uGrain + 1.0 / 255.0);
+
+    gl_FragColor = vec4(col, 1.0);
+}
+</script>
+
+<script>
+(function () {
+'use strict';
+
+/* ==========================================================================
+   1. CONFIGURAÇÃO
+   ========================================================================== */
+const STORAGE_KEY = 'fluido.config.v1';
+
+// Tudo o que o usuário pode alterar (e que é lembrado entre visitas).
+const config = {
+  viscosity: 0.1,
+  densityDissipation: 0.7,
+  velocityDissipation: 0.25,
+  splatRadius: 0.28,
+  curl: 28,
+  bloomIntensity: 0.8,
+  bloom: true,
+  sunrays: true,
+  shading: true,
+  grain: true,
+  colorMode: 'rainbow',        // 'rainbow' | 'palette' | 'custom'
+  palette: 'aurora',
+  customColor: '#3d8bff',
+  theme: 'dark',               // 'dark' | 'light'
+  panelCollapsed: null         // null = decide pelo tamanho da tela
+};
+
+// Constantes da simulação (comprimentos em "lados menores da tela").
+const SPLAT_FORCE = 28;            // impulso aplicado por unidade arrastada
+const DYE_RATE = 8;                // tinta injetada por segundo de arrasto
+const MAX_VISCOSITY = 0.01;        // ν com o slider no máximo
+const PRESSURE_DAMPING = 0.8;      // quanto da pressão anterior serve de chute inicial
+const PRESSURE_CHEBYSHEV = true;   // acelera o Jacobi da pressão (false = Jacobi puro)
+const BLOOM_RESOLUTION = 256;
+const BLOOM_ITERATIONS = 6;
+const BLOOM_THRESHOLD = 0.6;
+const BLOOM_SOFT_KNEE = 0.7;
+const SUNRAYS_RESOLUTION = 196;
+const IDLE_DELAY = 4;              // segundos parado até os splats automáticos começarem
+const TAP_MAX_MOVE = 8;            // px: acima disso o gesto é arrasto, não toque
+const TAP_MAX_TIME = 350;          // ms
+
+// Degraus de qualidade: o adaptador desce um degrau quando o aparelho não sustenta 60 fps.
+const QUALITY_LEVELS = [
+  { sim: 256, dye: 1024, pressure: 30, dpr: 2 },
+  { sim: 192, dye: 768,  pressure: 26, dpr: 2 },
+  { sim: 128, dye: 512,  pressure: 22, dpr: 1.5 },
+  { sim: 96,  dye: 384,  pressure: 20, dpr: 1.25 },
+  { sim: 64,  dye: 256,  pressure: 16, dpr: 1 }
+];
+
+const PALETTES = [
+  { id: 'aurora',     name: 'Aurora',     colors: ['#00ff9d', '#22e4ff', '#5b6cff', '#b14bff', '#ff5fd2', '#3dffcf'] },
+  { id: 'oceano',     name: 'Oceano',     colors: ['#0466c8', '#0096ff', '#00c2e0', '#4de8e0', '#a5f3ff', '#1d4ed8'] },
+  { id: 'lava',       name: 'Lava',       colors: ['#ff2a00', '#ff6a00', '#ffa600', '#ffd43b', '#e01e37', '#9d0208'] },
+  { id: 'neon',       name: 'Neon',       colors: ['#ff00e5', '#00f0ff', '#b4ff00', '#ff3c00', '#7a00ff', '#fff200'] },
+  { id: 'aquarela',   name: 'Aquarela',   colors: ['#f2789f', '#6fa8f5', '#6fd6b0', '#f5c04a', '#b08be6', '#ff9070'] },
+  { id: 'crepusculo', name: 'Crepúsculo', colors: ['#5f3dc4', '#c2409f', '#ff5e7e', '#ff8a4c', '#ffc857', '#845ef7'] }
+];
+
+const CUSTOM_SWATCHES = ['#3d8bff', '#00e0b8', '#ffd23f', '#ff6b35', '#ff3d81', '#a66bff', '#ffffff'];
+
+const BACKGROUNDS = { dark: '#05060a', light: '#f3efe6' };
+
+function loadConfig () {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+    if (!saved) return;
+    Object.keys(config).forEach(function (key) {
+      if (key in saved && (config[key] === null || typeof saved[key] === typeof config[key])) config[key] = saved[key];
+    });
+  } catch (e) { /* armazenamento indisponível: segue com os padrões */ }
+  if (!PALETTES.some(function (p) { return p.id === config.palette; })) config.palette = PALETTES[0].id;
+  if (['rainbow', 'palette', 'custom'].indexOf(config.colorMode) < 0) config.colorMode = 'rainbow';
+  if (!BACKGROUNDS[config.theme]) config.theme = 'dark';
+  if (!/^#[0-9a-f]{6}$/i.test(config.customColor)) config.customColor = '#3d8bff';
+}
+
+function saveConfig () {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(config)); } catch (e) { /* ignora */ }
+}
+
+/* ==========================================================================
+   2. UTILITÁRIOS
+   ========================================================================== */
+const $ = function (id) { return document.getElementById(id); };
+const clamp = function (v, a, b) { return Math.min(Math.max(v, a), b); };
+const rand = function (a, b) { return a + Math.random() * (b - a); };
+
+function hexToRgb (hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255];
+}
+function rgbToHex (rgb) {
+  return '#' + rgb.map(function (v) { return Math.round(clamp(v, 0, 1) * 255).toString(16).padStart(2, '0'); }).join('');
+}
+function srgbToLinear (rgb) {
+  return rgb.map(function (v) { return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
+}
+function linearToSrgb (rgb) {
+  return rgb.map(function (v) { return v <= 0.0031308 ? v * 12.92 : 1.055 * Math.pow(v, 1 / 2.4) - 0.055; });
+}
+function hsvToRgb (h, s, v) {
+  const i = Math.floor(h * 6), f = h * 6 - i;
+  const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+  switch (((i % 6) + 6) % 6) {
+    case 0: return [v, t, p];
+    case 1: return [q, v, p];
+    case 2: return [p, v, t];
+    case 3: return [p, q, v];
+    case 4: return [t, p, v];
+    default: return [v, p, q];
+  }
+}
+
+/* ==========================================================================
+   3. CONTEXTO WEBGL (WebGL2 com fallback para WebGL1)
+   ========================================================================== */
+const canvas = $('fluid');
+let gl = null;
+let ext = null;                // capacidades detectadas
+let programs = null;           // programas compilados
+let displayVariants = {};      // variantes do shader de exibição, por combinação de efeitos
+
+function createContext () {
+  const params = { alpha: false, depth: false, stencil: false, antialias: false, preserveDrawingBuffer: false, powerPreference: 'high-performance' };
+  let ctx = canvas.getContext('webgl2', params);
+  const isWebGL2 = !!ctx;
+  if (!ctx) ctx = canvas.getContext('webgl', params) || canvas.getContext('experimental-webgl', params);
+  if (!ctx) return false;
+  gl = ctx;
+
+  let texType = null;
+  let linearFiltering = false;
+  if (isWebGL2) {
+    gl.getExtension('EXT_color_buffer_float');
+    gl.getExtension('EXT_color_buffer_half_float');
+    gl.getExtension('EXT_float_blend');
+    texType = gl.HALF_FLOAT;
+    linearFiltering = true;                       // filtrar meio-float é parte do WebGL2
+  } else {
+    const half = gl.getExtension('OES_texture_half_float');
+    gl.getExtension('EXT_color_buffer_half_float');
+    gl.getExtension('WEBGL_color_buffer_float');
+    if (half) {
+      texType = half.HALF_FLOAT_OES;
+      linearFiltering = !!gl.getExtension('OES_texture_half_float_linear');
+    } else if (gl.getExtension('OES_texture_float')) {
+      texType = gl.FLOAT;
+      linearFiltering = !!gl.getExtension('OES_texture_float_linear');
+    }
+  }
+  if (texType === null) return false;
+
+  gl.clearColor(0, 0, 0, 1);
+
+  let formatRGBA, formatRG, formatR;
+  if (isWebGL2) {
+    formatRGBA = getSupportedFormat(gl.RGBA16F, gl.RGBA, texType);
+    formatRG = getSupportedFormat(gl.RG16F, gl.RG, texType);
+    formatR = getSupportedFormat(gl.R16F, gl.RED, texType);
+  } else {
+    formatRGBA = formatRG = formatR = getSupportedFormat(gl.RGBA, gl.RGBA, texType);
+  }
+  if (!formatRGBA || !formatRG || !formatR) return false;
+
+  const highp = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+  ext = {
+    isWebGL2: isWebGL2,
+    texType: texType,
+    linearFiltering: linearFiltering,
+    formatRGBA: formatRGBA,
+    formatRG: formatRG,
+    formatR: formatR,
+    precision: highp && highp.precision > 0 ? 'highp' : 'mediump'
+  };
+  return true;
+}
+
+// Procura um formato de textura que a GPU aceite como alvo de renderização.
+function getSupportedFormat (internalFormat, format, type) {
+  if (!isRenderable(internalFormat, format, type)) {
+    switch (internalFormat) {
+      case gl.R16F: return getSupportedFormat(gl.RG16F, gl.RG, type);
+      case gl.RG16F: return getSupportedFormat(gl.RGBA16F, gl.RGBA, type);
+      default: return null;
+    }
+  }
+  return { internalFormat: internalFormat, format: format };
+}
+
+function isRenderable (internalFormat, format, type) {
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, 4, 4, 0, format, type, null);
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.deleteFramebuffer(fbo);
+  gl.deleteTexture(texture);
+  return ok;
+}
+
+/* ==========================================================================
+   4. SHADERS E PROGRAMAS
+   Os fontes GLSL ficam nas tags <script type="x-shader/..."> acima.
+   ========================================================================== */
+function shaderSource (id) {
+  return $(id).textContent.trim() + '\n';
+}
+
+function compileShader (type, source, keywords) {
+  let header = 'precision ' + ext.precision + ' float;\nprecision ' + ext.precision + ' sampler2D;\n';
+  (keywords || []).forEach(function (k) { header += '#define ' + k + '\n'; });
+  const shader = gl.createShader(type);
+  gl.shaderSource(shader, header + source);
+  gl.compileShader(shader);
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS) && !gl.isContextLost()) {
+    console.error('Falha ao compilar shader:\n' + gl.getShaderInfoLog(shader));
+  }
+  return shader;
+}
+
+let baseVertexShader = null;
+
+function createProgram (fragmentId, keywords) {
+  const program = gl.createProgram();
+  gl.attachShader(program, baseVertexShader);
+  gl.attachShader(program, compileShader(gl.FRAGMENT_SHADER, shaderSource(fragmentId), keywords));
+  gl.bindAttribLocation(program, 0, 'aPosition');
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS) && !gl.isContextLost()) {
+    console.error('Falha ao ligar programa "' + fragmentId + '":\n' + gl.getProgramInfoLog(program));
+  }
+  const uniforms = {};
+  const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) || 0;
+  for (let i = 0; i < count; i++) {
+    const name = gl.getActiveUniform(program, i).name;
+    uniforms[name] = gl.getUniformLocation(program, name);
+  }
+  return { program: program, uniforms: uniforms, bind: function () { gl.useProgram(program); } };
+}
+
+function createPrograms () {
+  baseVertexShader = compileShader(gl.VERTEX_SHADER, shaderSource('vs-base'));
+  displayVariants = {};
+  programs = {
+    copy: createProgram('fs-copy'),
+    clear: createProgram('fs-clear'),
+    splat: createProgram('fs-splat'),
+    advection: createProgram('fs-advection', ext.linearFiltering ? [] : ['MANUAL_FILTERING']),
+    curl: createProgram('fs-curl'),
+    vorticity: createProgram('fs-vorticity'),
+    viscosity: createProgram('fs-viscosity'),
+    divergence: createProgram('fs-divergence'),
+    pressure: createProgram('fs-pressure'),
+    gradientSubtract: createProgram('fs-gradient-subtract'),
+    bloomPrefilter: createProgram('fs-bloom-prefilter'),
+    bloomBlur: createProgram('fs-bloom-blur'),
+    sunraysMask: createProgram('fs-sunrays-mask'),
+    sunrays: createProgram('fs-sunrays'),
+    blur: createProgram('fs-blur')
+  };
+
+  // Um único quadrado de tela cheia serve a todos os passes.
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, -1, 1, 1, 1, 1, -1]), gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 0, 2, 3]), gl.STATIC_DRAW);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.enableVertexAttribArray(0);
+}
+
+// O shader de exibição é compilado sob demanda para cada combinação de efeitos ligados.
+function getDisplayProgram (keywords) {
+  const key = keywords.join('|');
+  if (!displayVariants[key]) displayVariants[key] = createProgram('fs-display', keywords);
+  return displayVariants[key];
+}
+
+/* ==========================================================================
+   5. FRAMEBUFFERS
+   ========================================================================== */
+function createFBO (w, h, fmt, filter) {
+  gl.activeTexture(gl.TEXTURE0);
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texImage2D(gl.TEXTURE_2D, 0, fmt.internalFormat, w, h, 0, fmt.format, ext.texType, null);
+
+  const fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+  gl.viewport(0, 0, w, h);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+
+  return {
+    texture: texture,
+    fbo: fbo,
+    width: w,
+    height: h,
+    texelSizeX: 1 / w,
+    texelSizeY: 1 / h,
+    attach: function (unit) {
+      gl.activeTexture(gl.TEXTURE0 + unit);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      return unit;
+    }
+  };
+}
+
+function disposeFBO (target) {
+  if (!target) return;
+  gl.deleteFramebuffer(target.fbo);
+  gl.deleteTexture(target.texture);
+}
+
+// Par leitura/escrita: cada passe lê de um e escreve no outro, depois trocam.
+function createDoubleFBO (w, h, fmt, filter) {
+  return {
+    width: w,
+    height: h,
+    texelSizeX: 1 / w,
+    texelSizeY: 1 / h,
+    read: createFBO(w, h, fmt, filter),
+    write: createFBO(w, h, fmt, filter),
+    swap: function () { const t = this.read; this.read = this.write; this.write = t; }
+  };
+}
+
+// Redimensiona preservando o conteúdo (a simulação continua de onde estava).
+function resizeFBO (target, w, h, fmt, filter) {
+  const fresh = createFBO(w, h, fmt, filter);
+  programs.copy.bind();
+  gl.uniform1i(programs.copy.uniforms.uTexture, target.attach(0));
+  blit(fresh);
+  disposeFBO(target);
+  return fresh;
+}
+
+function resizeDoubleFBO (target, w, h, fmt, filter) {
+  if (target.width === w && target.height === h) return target;
+  target.read = resizeFBO(target.read, w, h, fmt, filter);
+  disposeFBO(target.write);
+  target.write = createFBO(w, h, fmt, filter);
+  target.width = w;
+  target.height = h;
+  target.texelSizeX = 1 / w;
+  target.texelSizeY = 1 / h;
+  return target;
+}
+
+// Desenha o quadrado no alvo indicado (null = a tela).
+function blit (target) {
+  if (target) {
+    gl.viewport(0, 0, target.width, target.height);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fbo);
+  } else {
+    gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+  gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+}
+
+/* ==========================================================================
+   6. ESTADO DA SIMULAÇÃO
+   ========================================================================== */
+let velocity = null;         // campo de velocidade (par leitura/escrita)
+let dye = null;              // tinta (par leitura/escrita)
+let pressure = null;         // pressão (par leitura/escrita)
+let pressureSpare = null;    // terceiro buffer para a aceleração de Chebyshev
+let viscositySpare = null;   // terceiro buffer para a difusão por Jacobi
+let divergence = null;
+let curl = null;
+let bloom = null;
+let bloomChain = [];
+let sunrays = null;
+let sunraysTemp = null;
+
+let qualityLevel = 0;
+let aspect = [1, 1];         // tamanho da tela em "lados menores" (o menor lado vale 1)
+let simTexels = 128;         // células da grade ao longo do lado menor
+
+// Ajusta o canvas ao tamanho da janela; retorna true se o tamanho mudou.
+function resizeCanvas () {
+  const dpr = Math.min(window.devicePixelRatio || 1, QUALITY_LEVELS[qualityLevel].dpr);
+  const w = Math.max(2, Math.floor(canvas.clientWidth * dpr));
+  const h = Math.max(2, Math.floor(canvas.clientHeight * dpr));
+  if (canvas.width === w && canvas.height === h) return false;
+  canvas.width = w;
+  canvas.height = h;
+  return true;
+}
+
+// Dimensões de uma grade com `resolution` células no lado menor da tela.
+function gridSize (resolution) {
+  const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+  const ratio = Math.max(w / h, h / w);
+  const limit = gl.getParameter(gl.MAX_TEXTURE_SIZE) || 2048;
+  const min = Math.max(2, Math.round(Math.min(resolution, limit / ratio)));
+  const max = Math.max(2, Math.round(min * ratio));
+  return w > h ? { width: max, height: min } : { width: min, height: max };
+}
+
+function initFramebuffers () {
+  const level = QUALITY_LEVELS[qualityLevel];
+  const w = gl.drawingBufferWidth, h = gl.drawingBufferHeight;
+  const shortSide = Math.min(w, h);
+  aspect = [w / shortSide, h / shortSide];
+
+  const sim = gridSize(level.sim);
+  const ink = gridSize(Math.min(level.dye, shortSide));     // nunca mais texels do que pixels
+  const filter = ext.linearFiltering ? gl.LINEAR : gl.NEAREST;
+  simTexels = Math.min(sim.width, sim.height);
+
+  gl.disable(gl.BLEND);
+
+  dye = dye ? resizeDoubleFBO(dye, ink.width, ink.height, ext.formatRGBA, filter)
+            : createDoubleFBO(ink.width, ink.height, ext.formatRGBA, filter);
+
+  const simChanged = !velocity || velocity.width !== sim.width || velocity.height !== sim.height;
+  if (simChanged) {
+    velocity = velocity ? resizeDoubleFBO(velocity, sim.width, sim.height, ext.formatRG, filter)
+                        : createDoubleFBO(sim.width, sim.height, ext.formatRG, filter);
+    pressure = pressure ? resizeDoubleFBO(pressure, sim.width, sim.height, ext.formatR, gl.NEAREST)
+                        : createDoubleFBO(sim.width, sim.height, ext.formatR, gl.NEAREST);
+    [pressureSpare, viscositySpare, divergence, curl].forEach(disposeFBO);
+    pressureSpare = createFBO(sim.width, sim.height, ext.formatR, gl.NEAREST);
+    viscositySpare = createFBO(sim.width, sim.height, ext.formatRG, filter);
+    divergence = createFBO(sim.width, sim.height, ext.formatR, gl.NEAREST);
+    curl = createFBO(sim.width, sim.height, ext.formatR, gl.NEAREST);
+  }
+
+  // Pirâmide do bloom: cada nível tem metade da resolução do anterior.
+  const glow = gridSize(BLOOM_RESOLUTION);
+  if (!bloom || bloom.width !== glow.width || bloom.height !== glow.height) {
+    disposeFBO(bloom);
+    bloomChain.forEach(disposeFBO);
+    bloom = createFBO(glow.width, glow.height, ext.formatRGBA, filter);
+    bloomChain = [];
+    for (let i = 1; i <= BLOOM_ITERATIONS; i++) {
+      const bw = glow.width >> i, bh = glow.height >> i;
+      if (bw < 2 || bh < 2) break;
+      bloomChain.push(createFBO(bw, bh, ext.formatRGBA, filter));
+    }
+  }
+
+  const rays = gridSize(SUNRAYS_RESOLUTION);
+  if (!sunrays || sunrays.width !== rays.width || sunrays.height !== rays.height) {
+    disposeFBO(sunrays);
+    disposeFBO(sunraysTemp);
+    sunrays = createFBO(rays.width, rays.height, ext.formatRGBA, filter);
+    sunraysTemp = createFBO(rays.width, rays.height, ext.formatRGBA, filter);
+  }
+}
+
+// Esquece todos os buffers (usado quando o contexto WebGL é recriado).
+function resetFramebuffers () {
+  velocity = dye = pressure = pressureSpare = viscositySpare = divergence = curl = null;
+  bloom = sunrays = sunraysTemp = null;
+  bloomChain = [];
+}
+
+/* ==========================================================================
+   7. PASSO DA SIMULAÇÃO
+   Ordem: vorticidade -> viscosidade -> projeção de pressão -> advecção.
+   ========================================================================== */
+function step (dt) {
+  const p = programs;
+  const tx = velocity.texelSizeX, ty = velocity.texelSizeY;
+  let u;
+
+  gl.disable(gl.BLEND);
+
+  // 7.1 Rotacional da velocidade
+  p.curl.bind();
+  u = p.curl.uniforms;
+  gl.uniform2f(u.uTexelSize, tx, ty);
+  gl.uniform1i(u.uVelocity, velocity.read.attach(0));
+  blit(curl);
+
+  // 7.2 Vorticity confinement (intensidade dos redemoinhos)
+  if (config.curl > 0) {
+    p.vorticity.bind();
+    u = p.vorticity.uniforms;
+    gl.uniform2f(u.uTexelSize, tx, ty);
+    gl.uniform1i(u.uVelocity, velocity.read.attach(0));
+    gl.uniform1i(u.uCurl, curl.attach(1));
+    gl.uniform1f(u.uCurlStrength, config.curl);
+    gl.uniform1f(u.uDt, dt);
+    blit(velocity.write);
+    velocity.swap();
+  }
+
+  // 7.3 Difusão viscosa (Jacobi). u₀ fica intacto enquanto dois buffers se alternam.
+  const nu = MAX_VISCOSITY * config.viscosity * config.viscosity;
+  if (nu > 0) {
+    const alpha = nu * dt * simTexels * simTexels;
+    const iterations = clamp(Math.round(4 + 2 * alpha), 4, 20);
+    const source = velocity.read;
+    let current = source, next = velocity.write, spare = viscositySpare;
+    p.viscosity.bind();
+    u = p.viscosity.uniforms;
+    gl.uniform2f(u.uTexelSize, tx, ty);
+    gl.uniform1f(u.uAlpha, alpha);
+    gl.uniform1i(u.uSource, source.attach(1));
+    for (let i = 0; i < iterations; i++) {
+      gl.uniform1i(u.uVelocity, current.attach(0));
+      blit(next);
+      if (current === source) { current = next; next = spare; }
+      else { const t = current; current = next; next = t; }
+    }
+    velocity.read = current;
+    velocity.write = source;
+    viscositySpare = next;
+  }
+
+  // 7.4 Divergência
+  p.divergence.bind();
+  u = p.divergence.uniforms;
+  gl.uniform2f(u.uTexelSize, tx, ty);
+  gl.uniform1i(u.uVelocity, velocity.read.attach(0));
+  blit(divergence);
+
+  // 7.5 Pressão: parte da solução do quadro anterior (amortecida) e itera Jacobi.
+  p.clear.bind();
+  u = p.clear.uniforms;
+  gl.uniform1i(u.uTexture, pressure.read.attach(0));
+  gl.uniform1f(u.uValue, PRESSURE_DAMPING);
+  blit(pressure.write);
+  pressure.swap();
+
+  p.pressure.bind();
+  u = p.pressure.uniforms;
+  gl.uniform2f(u.uTexelSize, tx, ty);
+  gl.uniform1i(u.uDivergence, divergence.attach(0));
+  // Chebyshev: o raio espectral assumido é escolhido conforme o número de iterações, de modo
+  // que elas reduzam o erro ~7x em toda a faixa coberta. Nos testes, a divergência residual
+  // cai para menos da metade da obtida com Jacobi puro, pelo mesmo custo.
+  const pressureIterations = QUALITY_LEVELS[qualityLevel].pressure;
+  const rho = PRESSURE_CHEBYSHEV ? 1 / Math.cosh(2.6 / pressureIterations) : 0;
+  const rho2 = rho * rho;
+  let previous = pressure.read, current = pressure.read, next = pressure.write;
+  let omega = 1;
+  for (let i = 0; i < pressureIterations; i++) {
+    gl.uniform1i(u.uPressure, current.attach(1));
+    gl.uniform1i(u.uPrevPressure, previous.attach(2));
+    gl.uniform1f(u.uOmega, omega);
+    blit(next);
+    const freed = previous === current ? pressureSpare : previous;
+    previous = current;
+    current = next;
+    next = freed;
+    omega = i === 0 ? 2 / (2 - rho2) : 4 / (4 - rho2 * omega);   // pesos de Chebyshev
+  }
+  pressure.read = current;
+  pressure.write = previous;
+  pressureSpare = next;
+
+  // 7.6 Projeção: remove o gradiente de pressão
+  p.gradientSubtract.bind();
+  u = p.gradientSubtract.uniforms;
+  gl.uniform2f(u.uTexelSize, tx, ty);
+  gl.uniform1i(u.uPressure, pressure.read.attach(0));
+  gl.uniform1i(u.uVelocity, velocity.read.attach(1));
+  blit(velocity.write);
+  velocity.swap();
+
+  // 7.7 Advecção da velocidade por ela mesma
+  p.advection.bind();
+  u = p.advection.uniforms;
+  gl.uniform2f(u.uTexelSize, tx, ty);
+  gl.uniform2f(u.uVelocityTexelSize, tx, ty);
+  gl.uniform2f(u.uSourceTexelSize, tx, ty);
+  gl.uniform2f(u.uUvPerUnit, 1 / aspect[0], 1 / aspect[1]);
+  gl.uniform1f(u.uDt, dt);
+  gl.uniform1i(u.uVelocity, velocity.read.attach(0));
+  gl.uniform1i(u.uSource, velocity.read.attach(0));
+  gl.uniform1f(u.uDissipation, config.velocityDissipation);
+  blit(velocity.write);
+  velocity.swap();
+
+  // 7.8 Advecção da tinta
+  gl.uniform2f(u.uTexelSize, dye.texelSizeX, dye.texelSizeY);
+  gl.uniform2f(u.uSourceTexelSize, dye.texelSizeX, dye.texelSizeY);
+  gl.uniform1i(u.uVelocity, velocity.read.attach(0));
+  gl.uniform1i(u.uSource, dye.read.attach(1));
+  gl.uniform1f(u.uDissipation, config.densityDissipation);
+  blit(dye.write);
+  dye.swap();
+}
+
+// Injeta um splat: (x, y) em UV, velocidade em lados menores/s, cor em luz linear.
+function splat (x, y, vx, vy, color, sizeScale) {
+  const sigma = 0.17 * config.splatRadius * (sizeScale || 1);
+  const p = programs.splat, u = p.uniforms;
+  gl.disable(gl.BLEND);
+  p.bind();
+  gl.uniform2f(u.uAspect, aspect[0], aspect[1]);
+  gl.uniform2f(u.uPoint, x, y);
+  gl.uniform1f(u.uRadius, 2 * sigma * sigma);
+
+  if (vx !== 0 || vy !== 0) {
+    gl.uniform1i(u.uTarget, velocity.read.attach(0));
+    gl.uniform3f(u.uColor, vx, vy, 0);
+    blit(velocity.write);
+    velocity.swap();
+  }
+  if (color) {
+    gl.uniform1i(u.uTarget, dye.read.attach(0));
+    gl.uniform3f(u.uColor, color[0], color[1], color[2]);
+    blit(dye.write);
+    dye.swap();
+  }
+}
+
+// Zera tinta, velocidade e pressão.
+function clearFluid () {
+  const p = programs.clear;
+  gl.disable(gl.BLEND);
+  p.bind();
+  gl.uniform1f(p.uniforms.uValue, 0);
+  [dye, velocity, pressure].forEach(function (field) {
+    gl.uniform1i(p.uniforms.uTexture, field.read.attach(0));
+    blit(field.write);
+    field.swap();
+  });
+}
+
+/* ==========================================================================
+   8. RENDERIZAÇÃO E PÓS-PROCESSAMENTO
+   ========================================================================== */
+const BLOOM_GAIN = 1.15;         // ganho global do bloom (o slider multiplica este valor)
+const BLOOM_SCATTER = 0.55;      // peso dos níveis mais largos: maior = halo mais espalhado
+const RELIEF = 0.026;             // "altura" aparente da superfície no sombreamento 3D
+const GRAIN_AMOUNT = { dark: 0.036, light: 0.03 };
+
+let activeTheme = 'dark';        // tema que o render está usando agora
+let backgroundLinear = [0, 0, 0];
+let grainSeed = [0, 0];
+let grainTime = 0;
+let lightTime = 0;               // relógio da simulação (congela ao pausar)
+
+function render (target) {
+  const useBloom = config.bloom && config.bloomIntensity > 0 && ext.linearFiltering && bloomChain.length >= 2;
+  const useSunrays = config.sunrays && ext.linearFiltering;
+  if (useBloom) applyBloom(dye.read, bloom);
+  if (useSunrays) applySunrays(dye.read);
+  drawDisplay(target, useBloom, useSunrays);
+}
+
+// Bloom: limiar -> pirâmide de desfoques cada vez menores -> mistura de volta até a resolução base.
+// A mistura é normalizada (cada nível largo pesa menos), então o halo fica junto das áreas
+// brilhantes e o fundo continua escuro.
+function applyBloom (source, destination) {
+  let last = destination;
+  gl.disable(gl.BLEND);
+
+  const pre = programs.bloomPrefilter;
+  const knee = BLOOM_THRESHOLD * BLOOM_SOFT_KNEE + 0.0001;
+  pre.bind();
+  gl.uniform3f(pre.uniforms.uCurve, BLOOM_THRESHOLD - knee, knee * 2, 0.25 / knee);
+  gl.uniform1f(pre.uniforms.uThreshold, BLOOM_THRESHOLD);
+  gl.uniform1i(pre.uniforms.uTexture, source.attach(0));
+  blit(last);
+
+  const blur = programs.bloomBlur;
+  blur.bind();
+  for (let i = 0; i < bloomChain.length; i++) {
+    const dest = bloomChain[i];
+    gl.uniform2f(blur.uniforms.uTexelSize, last.texelSizeX, last.texelSizeY);
+    gl.uniform1i(blur.uniforms.uTexture, last.attach(0));
+    blit(dest);
+    last = dest;
+  }
+
+  gl.blendColor(0, 0, 0, BLOOM_SCATTER);
+  gl.blendFunc(gl.CONSTANT_ALPHA, gl.ONE_MINUS_CONSTANT_ALPHA);
+  gl.enable(gl.BLEND);
+  for (let i = bloomChain.length - 2; i >= 0; i--) {
+    const dest = bloomChain[i];
+    gl.uniform2f(blur.uniforms.uTexelSize, last.texelSizeX, last.texelSizeY);
+    gl.uniform1i(blur.uniforms.uTexture, last.attach(0));
+    blit(dest);
+    last = dest;
+  }
+
+  gl.disable(gl.BLEND);
+  gl.uniform2f(blur.uniforms.uTexelSize, last.texelSizeX, last.texelSizeY);
+  gl.uniform1i(blur.uniforms.uTexture, last.attach(0));
+  blit(destination);
+}
+
+// Raios de luz: máscara -> marcha radial em direção à fonte -> desfoque separável.
+function applySunrays (source) {
+  gl.disable(gl.BLEND);
+
+  const mask = programs.sunraysMask;
+  mask.bind();
+  gl.uniform1i(mask.uniforms.uTexture, source.attach(0));
+  blit(sunraysTemp);
+
+  // A fonte de luz passeia devagar em torno do centro para os feixes nunca ficarem estáticos.
+  const rays = programs.sunrays;
+  rays.bind();
+  gl.uniform2f(rays.uniforms.uLightPos, 0.5 + 0.16 * Math.cos(lightTime * 0.11), 0.5 + 0.12 * Math.sin(lightTime * 0.17));
+  gl.uniform1i(rays.uniforms.uTexture, sunraysTemp.attach(0));
+  blit(sunrays);
+
+  const blur = programs.blur;
+  blur.bind();
+  gl.uniform2f(blur.uniforms.uDirection, sunrays.texelSizeX, 0);
+  gl.uniform1i(blur.uniforms.uTexture, sunrays.attach(0));
+  blit(sunraysTemp);
+  gl.uniform2f(blur.uniforms.uDirection, 0, sunrays.texelSizeY);
+  gl.uniform1i(blur.uniforms.uTexture, sunraysTemp.attach(0));
+  blit(sunrays);
+}
+
+function drawDisplay (target, useBloom, useSunrays) {
+  const keywords = [];
+  if (config.shading) keywords.push('SHADING');
+  if (useBloom) keywords.push('BLOOM');
+  if (useSunrays) keywords.push('SUNRAYS');
+  if (activeTheme === 'light') keywords.push('LIGHT_BG');
+
+  const p = getDisplayProgram(keywords), u = p.uniforms;
+  const inkTexel = 1 / Math.min(dye.width, dye.height);
+  const pixelRatio = gl.drawingBufferWidth / Math.max(1, canvas.clientWidth);
+
+  gl.disable(gl.BLEND);
+  p.bind();
+  gl.uniform2f(u.uTexelSize, dye.texelSizeX, dye.texelSizeY);
+  gl.uniform1i(u.uTexture, dye.read.attach(0));
+  if (useBloom) {
+    gl.uniform1i(u.uBloom, bloom.attach(1));
+    gl.uniform1f(u.uBloomIntensity, config.bloomIntensity * BLOOM_GAIN);
+  }
+  if (useSunrays) gl.uniform1i(u.uSunrays, sunrays.attach(2));
+  gl.uniform3f(u.uBackground, backgroundLinear[0], backgroundLinear[1], backgroundLinear[2]);
+  gl.uniform2f(u.uAspect, aspect[0], aspect[1]);
+  gl.uniform2f(u.uSeed, grainSeed[0], grainSeed[1]);
+  gl.uniform1f(u.uBump, 2 * inkTexel / RELIEF);
+  gl.uniform1f(u.uGrain, config.grain ? GRAIN_AMOUNT[activeTheme] : 0);
+  gl.uniform1f(u.uGrainScale, 1 / Math.max(1, Math.round(pixelRatio * 0.75)));
+  blit(target);
+}
+
+// O grão muda ~24 vezes por segundo, como em película, e não a cada quadro.
+function updateGrain (now) {
+  if (now - grainTime < 41) return;
+  grainTime = now;
+  grainSeed = [Math.floor(Math.random() * 977), Math.floor(Math.random() * 977)];
+}
+
+// Salva o quadro atual como PNG. O quadro é redesenhado na hora porque o buffer
+// de desenho não é preservado entre quadros (melhor desempenho em celulares).
+function captureImage () {
+  render(null);
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
+  const save = function (url, revoke) {
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'fluido-' + stamp + '.png';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    if (revoke) setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+  };
+  if (canvas.toBlob) {
+    canvas.toBlob(function (blob) {
+      if (blob) { save(URL.createObjectURL(blob), true); toast('Imagem salva'); }
+      else toast('Não foi possível capturar a imagem');
+    }, 'image/png');
+  } else {
+    save(canvas.toDataURL('image/png'), false);
+    toast('Imagem salva');
+  }
+}
+
+/* ==========================================================================
+   9. CORES
+   Todas as cores entram na simulação em luz linear, o que faz as misturas
+   ficarem limpas (sem bordas escuras entre matizes).
+   ========================================================================== */
+const paletteCache = {};
+PALETTES.forEach(function (palette) {
+  paletteCache[palette.id] = palette.colors.map(function (hex) { return srgbToLinear(hexToRgb(hex)); });
+});
+
+let colorClock = 0;      // avança com o tempo; define o matiz / a posição na paleta
+
+// Garante um brilho mínimo: tons muito escuros sumiriam num meio que emite luz.
+function ensureVisible (rgb) {
+  const m = Math.max(rgb[0], rgb[1], rgb[2]);
+  if (m < 0.04) return [0.45, 0.45, 0.45];
+  const k = Math.max(1, 0.5 / m);
+  return [rgb[0] * k, rgb[1] * k, rgb[2] * k];
+}
+
+// Interpolação cíclica e suave entre as cores de uma paleta.
+function samplePalette (colors, t) {
+  const n = colors.length;
+  const x = (((t % 1) + 1) % 1) * n;
+  const i = Math.floor(x) % n;
+  const f = x - Math.floor(x);
+  const s = f * f * (3 - 2 * f);
+  const a = colors[i], b = colors[(i + 1) % n];
+  return [a[0] + (b[0] - a[0]) * s, a[1] + (b[1] - a[1]) * s, a[2] + (b[2] - a[2]) * s];
+}
+
+// Cor do pincel para uma dada fase (0..1 percorre o arco-íris ou a paleta inteira).
+function colorAt (phase) {
+  if (config.colorMode === 'custom') return ensureVisible(srgbToLinear(hexToRgb(config.customColor)));
+  if (config.colorMode === 'palette') return ensureVisible(samplePalette(paletteCache[config.palette], phase));
+  return srgbToLinear(hsvToRgb(((phase % 1) + 1) % 1, 1, 1));
+}
+
+function scaleColor (rgb, k) {
+  return [rgb[0] * k, rgb[1] * k, rgb[2] * k];
+}
+
+// Cor para splats soltos: sorteia a fase; na cor personalizada varia só o brilho.
+function randomColor () {
+  const color = colorAt(Math.random());
+  return config.colorMode === 'custom' ? scaleColor(color, rand(0.6, 1.25)) : color;
+}
+
+function accentHex () {
+  const c = colorAt(colorClock);
+  const m = Math.max(c[0], c[1], c[2], 0.001);
+  return rgbToHex(linearToSrgb(scaleColor(c, Math.min(1, 1 / m))));
+}
+
+/* ==========================================================================
+   10. ENTRADA: mouse, toque e multitoque (Pointer Events)
+   ========================================================================== */
+const pointers = new Map();      // um registro por dedo / botão pressionado
+const burstQueue = [];           // toques rápidos aguardando o próximo quadro
+let pointerCount = 0;
+let lastInteraction = 0;
+let nextIdleSplat = 0;
+
+function pointerUv (e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1),
+    y: clamp(1 - (e.clientY - rect.top) / Math.max(1, rect.height), 0, 1)
+  };
+}
+
+function noteInteraction () {
+  lastInteraction = performance.now();
+  dismissIntro();
+}
+
+function onPointerDown (e) {
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  e.preventDefault();
+  if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+  try { canvas.setPointerCapture(e.pointerId); } catch (err) { /* sem captura: segue normalmente */ }
+  const pos = pointerUv(e);
+  pointers.set(e.pointerId, {
+    x: pos.x, y: pos.y,                 // posição atual (UV)
+    lastX: pos.x, lastY: pos.y,         // última posição já aplicada ao fluido
+    startX: e.clientX, startY: e.clientY,
+    startTime: performance.now(),
+    lastTime: performance.now(),
+    dragging: false,
+    moved: false,
+    phase: (pointerCount++ % 8) * 0.137   // cada dedo ganha uma cor um pouco diferente
+  });
+  noteInteraction();
+}
+
+function onPointerMove (e) {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  const pos = pointerUv(e);
+  p.x = pos.x;
+  p.y = pos.y;
+  p.moved = true;
+  if (!p.dragging && Math.hypot(e.clientX - p.startX, e.clientY - p.startY) > TAP_MAX_MOVE) p.dragging = true;
+  noteInteraction();
+}
+
+function onPointerUp (e) {
+  const p = pointers.get(e.pointerId);
+  if (!p) return;
+  pointers.delete(e.pointerId);
+  // Toque/clique rápido e sem arrasto: explosão de cor.
+  if (e.type === 'pointerup' && !p.dragging && performance.now() - p.startTime < TAP_MAX_TIME) {
+    burstQueue.push({ x: p.x, y: p.y, phase: p.phase });
+  }
+  noteInteraction();
+}
+
+function bindPointerEvents () {
+  canvas.addEventListener('pointerdown', onPointerDown);
+  canvas.addEventListener('pointermove', onPointerMove);
+  canvas.addEventListener('pointerup', onPointerUp);
+  canvas.addEventListener('pointercancel', onPointerUp);
+  canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+}
+
+// Converte o movimento acumulado de cada ponteiro em splats (chamado uma vez por quadro).
+function applyInputs () {
+  while (burstQueue.length) burst(burstQueue.shift());
+
+  const now = performance.now();
+  pointers.forEach(function (p) {
+    if (!p.moved || !p.dragging) return;
+    p.moved = false;
+
+    const dx = (p.x - p.lastX) * aspect[0];
+    const dy = (p.y - p.lastY) * aspect[1];
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1e-5) return;
+
+    // Arrastos rápidos são subdivididos para o traço sair contínuo, sem "bolinhas".
+    const sigma = 0.17 * config.splatRadius;
+    const steps = clamp(Math.ceil(dist / (0.6 * sigma)), 1, 12);
+    const elapsed = clamp((now - p.lastTime) / 1000, 1 / 240, 1 / 20);
+    const color = scaleColor(colorAt(colorClock + p.phase), DYE_RATE * elapsed / steps);
+    const fx = dx * SPLAT_FORCE / steps;
+    const fy = dy * SPLAT_FORCE / steps;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      splat(p.lastX + (p.x - p.lastX) * t, p.lastY + (p.y - p.lastY) * t, fx, fy, color, 1);
+    }
+    p.lastX = p.x;
+    p.lastY = p.y;
+    p.lastTime = now;
+  });
+}
+
+// Explosão de cor: um núcleo brilhante e jatos em leque que o empurram para fora.
+// (Jatos separados, e não uma fonte radial pura, porque um fluido incompressível
+// não "expande": a projeção de pressão anularia o movimento.)
+function burst (b) {
+  const sigma = 0.17 * config.splatRadius;
+  const base = colorClock + b.phase;
+  splat(b.x, b.y, 0, 0, scaleColor(colorAt(base), 2.2), 1.5);
+
+  const jets = 6 + Math.floor(Math.random() * 3);
+  const start = Math.random() * Math.PI * 2;
+  for (let i = 0; i < jets; i++) {
+    const angle = start + (i / jets) * Math.PI * 2 + rand(-0.25, 0.25);
+    const speed = rand(1.6, 3.0);
+    const cx = Math.cos(angle), cy = Math.sin(angle);
+    const tint = scaleColor(colorAt(base + rand(-0.09, 0.09)), rand(0.6, 1.0));
+    splat(b.x + cx * sigma * 1.1 / aspect[0], b.y + cy * sigma * 1.1 / aspect[1], cx * speed, cy * speed, tint, 0.75);
+  }
+}
+
+// Splats em posições e direções aleatórias. `gentle` é a versão suave usada no modo ocioso.
+function randomSplats (count, gentle) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = gentle ? rand(0.5, 1.3) : rand(1.8, 4.2);
+    splat(rand(0.08, 0.92), rand(0.08, 0.92), Math.cos(angle) * speed, Math.sin(angle) * speed,
+          scaleColor(randomColor(), gentle ? 0.8 : 1.7), gentle ? 1.5 : 1.25);
+  }
+}
+
+// Usuário parado há alguns segundos: splats suaves e espaçados mantêm a tela viva.
+function idleSplats (now) {
+  if (pointers.size > 0 || now - lastInteraction < IDLE_DELAY * 1000 || now < nextIdleSplat) return;
+  randomSplats(1, true);
+  nextIdleSplat = now + rand(900, 2300);
+}
+
+/* ==========================================================================
+   11. INTERFACE
+   Sliders, interruptores e paletas são gerados a partir destas tabelas.
+   ========================================================================== */
+const SLIDERS = [
+  { key: 'viscosity',           label: 'Viscosidade',              min: 0,    max: 1,  step: 0.01, digits: 2 },
+  { key: 'densityDissipation',  label: 'Dissipação da cor',        min: 0,    max: 4,  step: 0.05, digits: 2 },
+  { key: 'velocityDissipation', label: 'Dissipação da velocidade', min: 0,    max: 4,  step: 0.05, digits: 2 },
+  { key: 'splatRadius',         label: 'Tamanho do pincel',        min: 0.05, max: 1,  step: 0.01, digits: 2 },
+  { key: 'curl',                label: 'Redemoinhos',              min: 0,    max: 50, step: 1,    digits: 0 },
+  { key: 'bloomIntensity',      label: 'Intensidade do bloom',     min: 0,    max: 2,  step: 0.01, digits: 2 }
+];
+
+const TOGGLES = [
+  { key: 'bloom',   label: 'Bloom',         hint: 'Brilho ao redor das áreas mais intensas',        needsFiltering: true },
+  { key: 'sunrays', label: 'Raios de luz',  hint: 'Feixes de luz que atravessam o fluido',          needsFiltering: true },
+  { key: 'shading', label: 'Relevo 3D',     hint: 'Sombreamento que dá volume à superfície' },
+  { key: 'grain',   label: 'Grão de filme', hint: 'Textura sutil de película' }
+];
+
+let paused = false;
+let uiHidden = false;
+let saveTimer = 0;
+let toastTimer = 0;
+let introTimer = 0;
+
+function saveSoon () {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveConfig, 300);
+}
+
+function toast (message) {
+  const el = $('toast');
+  el.textContent = message;
+  el.classList.add('is-visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { el.classList.remove('is-visible'); }, 2400);
+}
+
+function dismissIntro () {
+  $('intro').classList.add('is-gone');
+  clearTimeout(introTimer);
+}
+
+function formatNumber (value, digits) {
+  return value.toLocaleString('pt-BR', { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function buildSliders () {
+  const host = $('sliders');
+  SLIDERS.forEach(function (def) {
+    const wrap = document.createElement('div');
+    wrap.className = 'slider';
+    wrap.innerHTML =
+      '<div class="slider__row"><label for="s-' + def.key + '">' + def.label + '</label><output for="s-' + def.key + '"></output></div>' +
+      '<input type="range" id="s-' + def.key + '" min="' + def.min + '" max="' + def.max + '" step="' + def.step + '">';
+    const input = wrap.querySelector('input');
+    const output = wrap.querySelector('output');
+    const sync = function () {
+      const value = Number(input.value);
+      output.textContent = formatNumber(value, def.digits);
+      input.style.setProperty('--p', ((value - def.min) / (def.max - def.min) * 100).toFixed(2) + '%');
+    };
+    input.value = clamp(config[def.key], def.min, def.max);
+    config[def.key] = Number(input.value);
+    sync();
+    input.addEventListener('input', function () {
+      config[def.key] = Number(input.value);
+      sync();
+      saveSoon();
+    });
+    host.appendChild(wrap);
+  });
+}
+
+function buildToggles () {
+  const host = $('toggles');
+  TOGGLES.forEach(function (def) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'toggle';
+    button.setAttribute('role', 'switch');
+    button.title = def.hint;
+    button.innerHTML = '<span class="toggle__dot"></span><span>' + def.label + '</span>';
+    if (def.needsFiltering && !ext.linearFiltering) {
+      button.disabled = true;
+      button.title = 'Indisponível nesta GPU';
+      config[def.key] = false;
+    }
+    const sync = function () { button.setAttribute('aria-checked', String(!!config[def.key])); };
+    sync();
+    button.addEventListener('click', function () {
+      config[def.key] = !config[def.key];
+      sync();
+      saveSoon();
+    });
+    host.appendChild(button);
+  });
+}
+
+// Grupo de botões exclusivos (role="radiogroup") com navegação por setas.
+function bindRadioGroup (host, getValue, setValue) {
+  const buttons = Array.prototype.slice.call(host.querySelectorAll('[role="radio"]'));
+  const sync = function () {
+    buttons.forEach(function (button) {
+      const on = button.dataset.value === getValue();
+      button.setAttribute('aria-checked', String(on));
+      button.tabIndex = on ? 0 : -1;
+    });
+  };
+  buttons.forEach(function (button, index) {
+    button.addEventListener('click', function () { setValue(button.dataset.value); sync(); });
+    button.addEventListener('keydown', function (e) {
+      const dir = (e.key === 'ArrowRight' || e.key === 'ArrowDown') ? 1 : (e.key === 'ArrowLeft' || e.key === 'ArrowUp') ? -1 : 0;
+      if (!dir) return;
+      e.preventDefault();
+      const target = buttons[(index + dir + buttons.length) % buttons.length];
+      target.focus();
+      target.click();
+    });
+  });
+  sync();
+  return sync;
+}
+
+function buildColorControls () {
+  const paletteHost = $('palettes');
+  PALETTES.forEach(function (palette) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'palette';
+    button.setAttribute('role', 'radio');
+    button.dataset.value = palette.id;
+    button.style.setProperty('--g', 'linear-gradient(115deg, ' + palette.colors.join(', ') + ')');
+    button.innerHTML = '<span>' + palette.name + '</span>';
+    paletteHost.appendChild(button);
+  });
+  bindRadioGroup(paletteHost, function () { return config.palette; }, function (value) {
+    config.palette = value;
+    saveSoon();
+    updateAccent();
+  });
+
+  const picker = $('customColor');
+  const hexLabel = $('customHex');
+  const setCustom = function (hex) {
+    config.customColor = hex.toLowerCase();
+    picker.value = config.customColor;
+    hexLabel.textContent = config.customColor.toUpperCase();
+    picker.parentElement.style.backgroundColor = config.customColor;
+    saveSoon();
+    updateAccent();
+  };
+  picker.addEventListener('input', function () { setCustom(picker.value); });
+  CUSTOM_SWATCHES.forEach(function (hex) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'swatch';
+    button.style.setProperty('--c', hex);
+    button.setAttribute('aria-label', 'Usar a cor ' + hex);
+    button.addEventListener('click', function () { setCustom(hex); });
+    $('swatches').appendChild(button);
+  });
+  setCustom(config.customColor);
+
+  const syncMode = function () {
+    $('revealPalette').classList.toggle('is-open', config.colorMode === 'palette');
+    $('revealCustom').classList.toggle('is-open', config.colorMode === 'custom');
+    updateAccent();
+  };
+  bindRadioGroup($('segMode'), function () { return config.colorMode; }, function (value) {
+    config.colorMode = value;
+    syncMode();
+    saveSoon();
+  });
+  syncMode();
+}
+
+// A cor de destaque da interface acompanha a cor atual do pincel.
+function updateAccent () {
+  document.documentElement.style.setProperty('--accent', accentHex());
+}
+
+function applyTheme () {
+  activeTheme = config.theme;
+  document.documentElement.dataset.theme = activeTheme;
+  backgroundLinear = srgbToLinear(hexToRgb(BACKGROUNDS[config.theme]));
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = BACKGROUNDS[config.theme];
+}
+
+// Troca de fundo com um breve "mergulho": o canvas some, o tema muda, o canvas volta.
+function setTheme (theme) {
+  if (theme === config.theme) return;
+  config.theme = theme;
+  saveSoon();
+  canvas.classList.add('is-switching');
+  setTimeout(function () {
+    applyTheme();
+    canvas.classList.remove('is-switching');
+  }, 240);
+}
+
+function setPanelCollapsed (collapsed, remember) {
+  $('panel').classList.toggle('is-collapsed', collapsed);
+  $('btnCollapse').setAttribute('aria-expanded', String(!collapsed));
+  $('panelCollapse').inert = collapsed;
+  if (remember) { config.panelCollapsed = collapsed; saveSoon(); }
+}
+
+function setPaused (value) {
+  paused = value;
+  const button = $('btnPause');
+  button.classList.toggle('is-alt', paused);
+  button.setAttribute('aria-pressed', String(paused));
+  button.dataset.tip = (paused ? 'Continuar' : 'Pausar') + ' · Espaço';
+  if (uiHidden) toast(paused ? 'Pausado' : 'Continuando');
+}
+
+// Modo contemplação: esconde toda a interface.
+function setUiHidden (hidden) {
+  uiHidden = hidden;
+  document.body.classList.toggle('ui-hidden', hidden);
+  if (hidden) {
+    const touch = window.matchMedia('(hover: none), (pointer: coarse)').matches;
+    toast(touch ? 'Modo contemplação · toque no olho para voltar' : 'Modo contemplação · pressione H para voltar');
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  }
+}
+
+const fullscreenRoot = document.documentElement;
+const requestFullscreen = fullscreenRoot.requestFullscreen || fullscreenRoot.webkitRequestFullscreen;
+const exitFullscreen = document.exitFullscreen || document.webkitExitFullscreen;
+
+function isFullscreen () {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+
+function toggleFullscreen () {
+  if (!requestFullscreen) { toast('Tela cheia indisponível neste navegador'); return; }
+  if (isFullscreen()) { exitFullscreen.call(document); return; }
+  try {
+    const result = requestFullscreen.call(fullscreenRoot);
+    if (result && result.catch) result.catch(function () { toast('Não foi possível entrar em tela cheia'); });
+  } catch (e) { toast('Não foi possível entrar em tela cheia'); }
+}
+
+function syncFullscreen () {
+  const on = isFullscreen();
+  const button = $('btnFullscreen');
+  button.classList.toggle('is-alt', on);
+  button.dataset.tip = (on ? 'Sair da tela cheia' : 'Tela cheia') + ' · F';
+}
+
+const actions = {
+  pause: function () { setPaused(!paused); },
+  clear: function () { clearFluid(); lastInteraction = performance.now(); if (uiHidden) toast('Tela limpa'); },
+  random: function () { randomSplats(Math.floor(rand(6, 11)), false); dismissIntro(); },
+  capture: captureImage,
+  fullscreen: toggleFullscreen,
+  hide: function () { setUiHidden(!uiHidden); }
+};
+
+function bindActions () {
+  const map = { btnPause: 'pause', btnClear: 'clear', btnRandom: 'random', btnCapture: 'capture', btnFullscreen: 'fullscreen', btnHide: 'hide', btnRestore: 'hide' };
+  Object.keys(map).forEach(function (id) {
+    $(id).addEventListener('click', actions[map[id]]);
+  });
+
+  // Clique com ponteiro não deixa o foco preso no botão: assim Espaço continua sendo
+  // "pausar" em vez de repetir o último botão. (Quem navega por Tab mantém o foco.)
+  document.addEventListener('click', function (e) {
+    const button = e.detail > 0 && e.target.closest && e.target.closest('button');
+    if (button) button.blur();
+  });
+
+  $('panelHead').addEventListener('click', function () {
+    setPanelCollapsed(!$('panel').classList.contains('is-collapsed'), true);
+  });
+
+  if (!requestFullscreen) $('btnFullscreen').hidden = true;
+  document.addEventListener('fullscreenchange', syncFullscreen);
+  document.addEventListener('webkitfullscreenchange', syncFullscreen);
+
+  // Atalhos de teclado
+  window.addEventListener('keydown', function (e) {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    const target = e.target;
+    const onControl = target && (target.tagName === 'BUTTON' || (target.tagName === 'INPUT' && target.type === 'color'));
+    switch (e.key.toLowerCase()) {
+      case 'h': actions.hide(); break;
+      case 'escape': if (uiHidden) setUiHidden(false); break;
+      case ' ': if (onControl) return; e.preventDefault(); actions.pause(); break;
+      case 'p': actions.pause(); break;
+      case 'c': actions.clear(); break;
+      case 'r': actions.random(); break;
+      case 's': actions.capture(); break;
+      case 'f': actions.fullscreen(); break;
+      default: return;
+    }
+  });
+}
+
+function buildInterface () {
+  buildColorControls();
+  buildSliders();
+  buildToggles();
+  bindRadioGroup($('segTheme'), function () { return config.theme; }, setTheme);
+  bindActions();
+  applyTheme();
+  setPanelCollapsed(config.panelCollapsed === null ? window.innerWidth < 720 : config.panelCollapsed, false);
+  introTimer = setTimeout(dismissIntro, 9000);
+}
+
+/* ==========================================================================
+   12. QUALIDADE ADAPTATIVA
+   Mede o fps em janelas de 1 s. Se ficar abaixo da meta, primeiro descobre se a
+   culpa é da GPU: alguns quadros "vazios" (sem simular nem desenhar) revelam a
+   cadência que a tela/navegador permite. Só quando a simulação é o gargalo a
+   resolução desce um degrau — assim um modo de economia de energia que limita
+   tudo a 30 fps não derruba a qualidade à toa.
+   ========================================================================== */
+const perf = {
+  fps: 60,
+  target: 60,
+  frames: 0,
+  windowStart: 0,
+  gap: false,
+  cooldown: 2,          // janelas ignoradas após iniciar ou trocar de degrau
+  lowWindows: 0,
+  goodWindows: 0,
+  calibrating: 0,       // quadros vazios restantes
+  intervals: [],
+  loadedFps: 0,
+  strikes: QUALITY_LEVELS.map(function () { return 0; })   // vezes em que cada degrau se mostrou pesado demais
+};
+
+function setQuality (level) {
+  qualityLevel = clamp(level, 0, QUALITY_LEVELS.length - 1);
+  resizeCanvas();
+  initFramebuffers();
+  perf.cooldown = 2;
+  perf.lowWindows = perf.goodWindows = 0;
+}
+
+// Retorna true quando o quadro deve ficar vazio (calibração em andamento).
+function monitorPerformance (now, elapsedMs) {
+  if (perf.calibrating > 0) {
+    if (elapsedMs < 250) perf.intervals.push(elapsedMs);
+    if (--perf.calibrating === 0) finishCalibration(now);
+    return true;
+  }
+
+  if (elapsedMs > 250) perf.gap = true;
+  perf.frames++;
+  const span = now - perf.windowStart;
+  if (span < 1000) return false;
+
+  const fps = perf.frames * 1000 / span;
+  const valid = !perf.gap && !paused && !document.hidden;
+  perf.frames = 0;
+  perf.windowStart = now;
+  perf.gap = false;
+  if (!valid) return false;
+
+  perf.fps = fps;
+  if (perf.cooldown > 0) { perf.cooldown--; return false; }
+  if (fps > perf.target * 1.1) perf.target = Math.min(60, fps);
+
+  if (fps < perf.target * 0.85) {
+    perf.goodWindows = 0;
+    if (++perf.lowWindows >= 2 && qualityLevel < QUALITY_LEVELS.length - 1) {
+      perf.lowWindows = 0;
+      perf.loadedFps = fps;
+      perf.intervals = [];
+      perf.calibrating = 12;
+    }
+  } else {
+    perf.lowWindows = 0;
+    // Folga sustentada: tenta subir um degrau. Um degrau que já falhou uma vez (pode ter sido
+    // só um engasgo do sistema) ganha uma segunda chance após mais tempo; na segunda falha, nunca mais.
+    const better = qualityLevel - 1;
+    if (better >= 0 && perf.strikes[better] < 2 && fps >= perf.target * 0.96 &&
+        ++perf.goodWindows >= (perf.strikes[better] ? 30 : 10)) {
+      setQuality(better);
+    }
+  }
+  return false;
+}
+
+function finishCalibration (now) {
+  perf.frames = 0;
+  perf.windowStart = now;
+  perf.cooldown = 1;
+  const list = perf.intervals.slice(2).sort(function (a, b) { return a - b; });
+  if (!list.length) return;
+  const freeFps = 1000 / list[Math.floor(list.length / 2)];
+
+  if (perf.loadedFps > freeFps * 0.88) {
+    perf.target = Math.min(60, freeFps, perf.loadedFps);       // limite externo: mantém a qualidade
+  } else {
+    perf.target = Math.min(60, freeFps);
+    perf.strikes[qualityLevel]++;                              // este degrau é pesado demais
+    setQuality(qualityLevel + 1);
+  }
+}
+
+function updateStats () {
+  $('stats').textContent = Math.round(perf.fps) + ' fps · ' + simTexels + ' / ' + Math.min(dye.width, dye.height);
+}
+
+/* ==========================================================================
+   13. LAÇO PRINCIPAL E INICIALIZAÇÃO
+   ========================================================================== */
+let lastFrame = 0;
+let lastUiUpdate = 0;
+let contextLost = false;
+
+function frame (now) {
+  requestAnimationFrame(frame);
+  if (contextLost) { lastFrame = now; return; }
+
+  const elapsedMs = now - lastFrame;
+  lastFrame = now;
+  if (monitorPerformance(now, elapsedMs)) return;
+
+  if (resizeCanvas()) initFramebuffers();
+
+  const dt = clamp(elapsedMs / 1000, 1 / 240, 1 / 30);
+  colorClock += dt * 0.07;
+
+  applyInputs();
+  if (!paused) {
+    idleSplats(now);
+    step(dt);
+    lightTime += dt;
+    updateGrain(now);
+  }
+  render(null);
+
+  if (now - lastUiUpdate > 400) {
+    lastUiUpdate = now;
+    updateAccent();
+    updateStats();
+  }
+}
+
+function showFallback () {
+  $('fallback').classList.add('is-visible');
+  $('ui').style.display = 'none';
+}
+
+function start () {
+  loadConfig();
+  if (!createContext()) { showFallback(); return; }
+
+  const ua = navigator.userAgent;
+  const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua) || (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1);
+  qualityLevel = mobile ? 1 : 0;
+  if (!ext.linearFiltering) qualityLevel = Math.max(qualityLevel, 2);
+
+  createPrograms();
+  resizeCanvas();
+  initFramebuffers();
+  buildInterface();
+  bindPointerEvents();
+
+  // Contexto perdido (comum em celulares ao trocar de app): recria tudo quando voltar.
+  canvas.addEventListener('webglcontextlost', function (e) {
+    e.preventDefault();
+    contextLost = true;
+  });
+  canvas.addEventListener('webglcontextrestored', function () {
+    if (!createContext()) { showFallback(); return; }
+    createPrograms();
+    resetFramebuffers();
+    initFramebuffers();
+    randomSplats(5, false);
+    contextLost = false;
+  });
+
+  const now = performance.now();
+  lastFrame = now;
+  lastInteraction = now;
+  perf.windowStart = now;
+  randomSplats(Math.floor(rand(5, 8)), false);        // abertura: a tela já nasce viva
+  requestAnimationFrame(frame);
+}
+
+start();
+
+})();
+</script>
+</body>
+</html>
