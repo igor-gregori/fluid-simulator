@@ -1,0 +1,7 @@
+{
+  // Site estático servido pelo Cloudflare Workers (somente arquivos, sem código de servidor).
+  "name": "fluid-simulator",
+  "compatibility_date": "2026-10-01",
+  "assets": { "directory": "." },
+  "routes": [{ "pattern": "fluid-simulator.igreg.dev", "custom_domain": true }]
+}
